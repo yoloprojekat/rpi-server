@@ -60,25 +60,44 @@ docker compose up --build -d
 # 3. Provera logova u realnom vremenu
 docker compose logs -f
 ```
+### 🛠 Tehnološki Stack
 
-🛠 Tehnološki Stack
-Komponenta	Tehnologija	Uloga
-Baza	Docker (Debian 13 Trixie)	Izolacija i prenosivost
-Logika	Python 3.13 (Asyncio)	Srce serverske logike
-Kamera	python3-picamera2	Nativni RPi 5 video capture
-GPIO	lgpio / gpiozero	Precizna kontrola motora
-Mreža	aiortc (WebRTC)	Video prenos ultra-niske latencije
-🔌 Hardverska Mapa Pinova (BCM)
-Global PWM (Enable A+B): GPIO 18
+Sistem je strukturiran u slojevima kako bi se osigurale maksimalne performanse na Raspberry Pi 5 hardveru uz potpunu izolaciju softverskih zavisnosti.
 
-Motor A (Prednji Levi): GPIO 17, 27
+| Komponenta | Tehnologija | Uloga u Sistemu |
+| :--- | :--- | :--- |
+| **Virtualizacija** | **Docker** (Debian 13 Trixie) | Izolacija zavisnosti i $O(1)$ deployment |
+| **Runtime** | **Python 3.13** (Asyncio) | Asinhrona orkestracija procesa i I/O operacija |
+| **Video Engine** | **Picamera2** & **PyAV** | Nativni capture i procesiranje frejmova |
+| **Streaming** | **WebRTC** (`aiortc`) | P2P video prenos ultra-niske latencije |
+| **Kontrola** | **UDP Sockets** | Low-latency prenos komandi kretanja |
+| **Hardware I/O** | **lgpio** / **gpiozero** | Precizna PWM i digitalna kontrola pinova |
 
-Motor B (Prednji Desni): GPIO 22, 23
 
-Motor C (Zadnji Levi): GPIO 24, 25
 
-Motor D (Zadnji Desni): GPIO 5, 6
+---
 
+### 🔌 Hardverska Mapa Pinova (BCM)
+
+Konfiguracija pinova je optimizovana za **Raspberry Pi 5** i **L298N** motor drajvere. Za kontrolu se koristi BCM numeracija pinova.
+
+#### 🕹️ Kontrola Brzine (PWM)
+* **Global PWM (Enable A+B):** `GPIO 18` (Fizički Pin 12) — *Frekvencija: 50Hz*
+
+#### ⚙️ Motorna Logika (Digital Output)
+Ova tabela definiše parove pinova koji kontrolišu smer rotacije svakog od četiri motora.
+
+| Pozicija Motora | Smer 1 (IN1/3) | Smer 2 (IN2/4) |
+| :--- | :--- | :--- |
+| **Prednji Levi (A)** | `GPIO 17` | `GPIO 27` |
+| **Prednji Desni (B)** | `GPIO 22` | `GPIO 23` |
+| **Zadnji Levi (C)** | `GPIO 24` | `GPIO 25` |
+| **Zadnji Desni (D)** | `GPIO 5` | `GPIO 6` |
+
+
+
+> [!IMPORTANT]
+> **Napomena o uzemljenju:** Prilikom povezivanja, obavezno povežite **GND** (uzemljenje) L298N drajvera sa jednim od **GND** pinova na Raspberry Pi 5. Bez zajedničkog uzemljenja, PWM signal neće biti stabilan i motori mogu raditi nepredvidivo.
 <div align="center">
 
 Autor: Danilo Stoletović • Mentor: Dejan Batanjac
