@@ -50,7 +50,7 @@ Za pokretanje servera na Raspberry Pi 5 uređaju:
 
 ```bash
 # 1. Kloniranje projekta
-git clone https://github.com/dyoloprojekat/rpi-server.git
+git clone https://github.com/yoloprojekat/rpi-server.git
 
 cd rpi-server
 
