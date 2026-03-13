@@ -1,17 +1,20 @@
 version: '3.8'
 
 services:
-  robot:
-    build: .
-    container_name: rpi-server-container
-    # host mode is essential for WebRTC/UDP low latency
-    network_mode: "host"
-    # privileged gives access to /dev/video* and /dev/gpiochip*
-    privileged: true
+  rpi-server:
+    
+    image: ghcr.io/yoloprojekat/rpi-server:latest
+    container_name: pametno_vozilo_server
     restart: always
-    shm_size: '512mb'
+    privileged: true
+    network_mode: "host"
     volumes:
       - /dev:/dev
       - /run/udev:/run/udev:ro
     environment:
       - PYTHONUNBUFFERED=1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10mb"
+        max-file: "3"
