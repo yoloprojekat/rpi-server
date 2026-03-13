@@ -2,23 +2,26 @@ import asyncio
 import logging
 import time
 import sys
+import cv2
+import numpy as np
 from aiohttp import web
 import aiohttp_cors
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
-from av import VideoFrame
 from gpiozero import PWMOutputDevice, DigitalOutputDevice
 from gpiozero.pins.lgpio import LGPIOFactory
 from picamera2 import Picamera2
 
+# --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-logger = logging.getLogger("RPI-STABLE")
+logger = logging.getLogger("RPI-HTTP-STREAM")
 
 # --- HARDWARE SETUP ---
 try:
     factory = LGPIOFactory()
-    # Speed Control (Enable Pin)
+    # Speed Control (Enable Pin) - Global PWM na GPIO 18
     ENABCD = PWMOutputDevice(18, frequency=50, pin_factory=factory)
-    # Motor Logic Pins (17, 27, 22, 23, 24, 25, 5, 6)
+    
+    # Motor Logic Pins (BCM mapiranje prema tabeli iz README)
+    # Redosled: A1, A2, B1, B2, C1, C2, D1, D2
     motor_pins = [DigitalOutputDevice(p, pin_factory=factory) for p in [17, 27, 22, 23, 24, 25, 5, 6]]
 except Exception as e:
     logger.error(f"Hardware initialization failed: {e}")
@@ -29,68 +32,121 @@ LAST_CMD_TIME = 0.0
 LATEST_FRAME = None
 FRAME_EVENT = asyncio.Event()
 
-# --- WEBRTC TRACK ---
-class SharedCameraTrack(VideoStreamTrack):
-    async def recv(self):
-        pts, time_base = await self.next_timestamp()
-        await FRAME_EVENT.wait()
-        if LATEST_FRAME is None:
-            return None
-        frame = VideoFrame.from_ndarray(LATEST_FRAME, format="rgb24")
-        frame.pts, frame.time_base = pts, time_base
-        return frame
-
-# --- BACKGROUND TASKS ---
+# --- CAMERA & STREAMING LOGIC ---
 async def camera_loop(picam2):
+    """Hvata frejmove sa kamere i enkoduje ih u JPEG za stream."""
     global LATEST_FRAME
     loop = asyncio.get_running_loop()
     while True:
         try:
-            LATEST_FRAME = await loop.run_in_executor(None, picam2.capture_array, "main")
-            FRAME_EVENT.set()
-            FRAME_EVENT.clear()
-            await asyncio.sleep(0.033) # ~30 FPS
+            # Hvatanje RGB slike sa kamere
+            raw_frame = await loop.run_in_executor(None, picam2.capture_array, "main")
+            
+            # Konverzija u JPEG format
+            success, buffer = cv2.imencode('.jpg', cv2.cvtColor(raw_frame, cv2.COLOR_RGB2BGR))
+            if success:
+                LATEST_FRAME = buffer.tobytes()
+                FRAME_EVENT.set()
+                FRAME_EVENT.clear()
+            
+            await asyncio.sleep(0.04)  # ~25 FPS balans performansi i latencije
         except Exception as e:
             logger.error(f"Camera Error: {e}")
             await asyncio.sleep(1)
 
+async def video_feed(request):
+    """HTTP endpoint koji servira MJPEG stream."""
+    response = web.StreamResponse(
+        status=200,
+        reason='OK',
+        headers={
+            'Content-Type': 'multipart/x-mixed-replace;boundary=frame',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+        }
+    )
+    await response.prepare(request)
+
+    logger.info("Novi klijent povezan na video stream.")
+    try:
+        while True:
+            await FRAME_EVENT.wait()
+            if LATEST_FRAME:
+                # MJPEG standardni format frejma
+                frame_data = (
+                    b'--frame\r\n'
+                    b'Content-Type: image/jpeg\r\n\r\n' + LATEST_FRAME + b'\r\n'
+                )
+                await response.write(frame_data)
+    except Exception as e:
+        logger.info(f"Klijent prekinuo stream: {e}")
+    return response
+
+# --- MOTOR CONTROL & WATCHDOG ---
+async def handle_commands(request):
+    """UDP (ili u ovom slučaju HTTP) komandni endpoint."""
+    global LAST_CMD_TIME
+    data = await request.json()
+    # Logika kretanja ovde (npr. motor_pins[0].on(), itd.)
+    LAST_CMD_TIME = time.time()
+    return web.json_response({"status": "ok"})
+
 async def watchdog():
+    """Gasi motore ako komanda ne stigne na vreme."""
     while True:
         if ENABCD.value > 0 and (time.time() - LAST_CMD_TIME > 0.5):
-            logger.warning("Watchdog: Stopping motors due to timeout.")
+            logger.warning("Watchdog: Sigurnosno zaustavljanje zbog gubitka signala.")
             ENABCD.value = 0
-            for pin in motor_pins: pin.off()
+            for pin in motor_pins:
+                pin.off()
         await asyncio.sleep(0.1)
-
-# --- WEBRTC SIGNALING ---
-async def rtc_offer(request):
-    params = await request.json()
-    pc = RTCPeerConnection()
-    pc.addTrack(SharedCameraTrack())
-    await pc.setRemoteDescription(RTCSessionDescription(sdp=params["sdp"], type=params["type"]))
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-    return web.json_response({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
 
 # --- MAIN ENTRY ---
 async def main():
+    # Inicijalizacija kamere (RPi 5 optimizacija)
     picam2 = Picamera2()
-    picam2.configure(picam2.create_video_configuration(main={"size": (640, 480), "format": "RGB888"}))
+    config = picam2.create_video_configuration(main={"size": (640, 480), "format": "RGB888"})
+    picam2.configure(config)
     picam2.start()
 
+    # Pokretanje pozadinskih zadataka
     asyncio.create_task(camera_loop(picam2))
     asyncio.create_task(watchdog())
 
+    # Web Server podešavanje
     app = web.Application()
-    cors = aiohttp_cors.setup(app, defaults={"*": aiohttp_cors.ResourceOptions(allow_headers="*")})
-    cors.add(app.router.add_post("/offer", rtc_offer))
+    cors = aiohttp_cors.setup(app, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*"
+        )
+    })
+
+    # Rute
+    app.router.add_get('/video_feed', video_feed)
+    app.router.add_post('/control', handle_commands)
+    
+    # Dodavanje CORS-a na rute
+    for route in list(app.router.routes()):
+        cors.add(route)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", 1607).start()
+    
+    # Pokretanje servera na portu 1607
+    site = web.TCPSite(runner, "0.0.0.0", 1607)
+    await site.start()
 
-    logger.info("RPI-SERVER [Debian 13 Stable] Online.")
+    logger.info("------------------------------------------")
+    logger.info("RPI-SERVER [Debian 13] Online!")
+    logger.info("Video Stream: http://<RPi_IP_Adresa>:1607/video_feed")
+    logger.info("------------------------------------------")
+    
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Server ugašen.")
