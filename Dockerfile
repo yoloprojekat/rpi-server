@@ -2,12 +2,14 @@ FROM python:3.13-slim-bookworm
 
 WORKDIR /app
 
-# 1. Instalacija osnovnih alata, hardverskih biblioteka i alata za kompajliranje
+# 1. Instalacija sistemskih zavisnosti + SWIG koji je falio
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
     make \
+    swig \
+    python3-dev \
     wget \
     unzip \
     pkg-config \
@@ -21,8 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-opencv \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Ručno kompajliranje originalne lgpio C biblioteke 
-# Ovo direktno rešava "Failed to build lgpio" grešku u pip-u
+# 2. Kompajliranje lgpio C biblioteke (mora biti pre pip instalacije)
 RUN wget https://github.com/joan2937/lg/archive/master.zip && \
     unzip master.zip && \
     cd lg-master && \
@@ -32,13 +33,13 @@ RUN wget https://github.com/joan2937/lg/archive/master.zip && \
     rm -rf master.zip lg-master && \
     ldconfig
 
-# 3. Osvežavanje pip-a i instalacija Python zavisnosti
+# 3. Osvežavanje pip-a i instalacija Python biblioteka
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
+RUN pip install --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
-# 4. Kopiranje koda aplikacije
+# 4. Kopiranje ostatka koda
 COPY . .
 
-# 5. Pokretanje servera
+# 5. Pokretanje aplikacije
 CMD ["python", "-u", "main.py"]
