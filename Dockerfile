@@ -2,9 +2,13 @@ FROM python:3.13-slim-bookworm
 
 WORKDIR /app
 
-# Instalacija neophodnih sistemskih biblioteka
-# Koristimo libgpiod-dev umesto liblgpio-dev jer je standardniji u Debianu
+# Instalacija sistemskih zavisnosti
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Alati za kompajliranje (neophodni za python-prctl i lgpio)
+    build-essential \
+    gcc \
+    libcap-dev \
+    # Hardverske biblioteke
     libcamera-ipa \
     libglib2.0-0 \
     libwebcam0 \
@@ -21,5 +25,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Kopiranje ostatka koda
 COPY . .
 
-# Pokretanje aplikacije sa unbuffered output-om
+# Pokretanje aplikacije
 CMD ["python", "-u", "main.py"]
