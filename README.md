@@ -6,86 +6,73 @@
 ---
 
 <p align="center">
-  <i>Produkciono okruženje: Kontejnerizovan mrežni gateway i hardverska orkestracija optimizovana za RPi 5.</i>
+  <i>Edukativna platforma: Optimizovan mrežni gateway za hardversku orkestraciju, prilagođen studentima.</i>
 </p>
 
 [![Python](https://img.shields.io/badge/Python-3.13-38bdf8?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Deployment-Docker-2496ed?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![Raspberry Pi](https://img.shields.io/badge/Hardware-RPi_5-c51a4a?style=for-the-badge&logo=raspberrypi&logoColor=white)](https://www.raspberrypi.com/)
-[![WebRTC](https://img.shields.io/badge/Network-WebRTC-075985?style=for-the-badge&logo=webrtc&logoColor=white)](https://webrtc.org/)
+[![HTTP](https://img.shields.io/badge/Stream-HTTP_MJPEG-0ea5e9?style=for-the-badge&logo=fastapi&logoColor=white)](https://en.wikipedia.org/wiki/Motion_JPEG)
 
 </div>
 
----
-
 ## 🏗️ Docker Arhitektura i Benefiti
 
-Implementacija Docker kontejnera na **Debian 13 Stable** sistemu rešava kritične izazove embedded razvoja i donosi sledeće prednosti:
+Implementacija Docker kontejnera na **Debian 13 (Trixie)** sistemu rešava kritične izazove embedded razvoja i donosi sledeće prednosti:
 
-* **Izolacija Zavisnosti (No Dependency Hell):** Biblioteke kao što su `aiortc` i `PyAV` zahtevaju specifične verzije `OpenSSL` i `FFmpeg`. Docker izoluje ove binarne fajlove od host sistema, sprečavajući pucanje aplikacije prilikom sistemskih ažuriranja.
-* **Host OS Zaštita (PEP 668):** Debian 13 striktno sprovodi zaštitu sistemskog Python okruženja. Korišćenjem kontejnera, izbegavamo komplikovane virtuelne sredine na hostu i koristimo prednosti izolovane instalacije paketa.
-* **Deterministički Deployment ($O(1)$):** Vreme potrebno za setup novog uređaja smanjeno je sa 45+ minuta (kompilacija drajvera) na manje od 2 minuta (povlačenje gotovog image-a).
-* **Direktan Hardverski Pristup:** Korišćenjem `privileged: true` i mapiranjem `/dev` particija, kontejner zadržava nativan pristup `libcamera` i `lgpio` interfejsima uz performanse identične direktnom izvršavanju na hostu.
-* **Mrežna Optimizacija:** Upotreba `network_mode: "host"` eliminiše Docker bridge overhead, omogućavajući milisekundnu latenciju za UDP komande i nesmetanu WebRTC signalizaciju.
+* **Izolacija Zavisnosti (No Dependency Hell):** Specifične verzije biblioteka za kameru i GPIO su izolovane od host sistema, sprečavajući pucanje aplikacije prilikom sistemskih ažuriranja.
+* **Host OS Zaštita (PEP 668):** Debian 13 striktno štiti sistemski Python. Kontejner omogućava slobodnu instalaciju paketa bez narušavanja stabilnosti OS-a.
+* **Deterministički Deployment ($O(1)$):** Vreme potrebno za setup novog uređaja smanjeno je sa 45+ minuta na manje od 2 minuta povlačenjem gotovog image-a.
+* **Direktan Hardverski Pristup:** Korišćenjem `privileged: true` i mapiranjem `/dev` particija, kontejner zadržava nativan pristup hardveru uz performanse identične direktnom izvršavanju.
 
 ---
 
+## 🔄 Evolucija Arhitekture: Od WebRTC ka HTTP Stream-u
 
+Tokom razvoja, doneta je svesna odluka o prelasku sa WebRTC na **HTTP MJPEG Stream**. Primećeno je da je WebRTC u ovom kontekstu bio **"overengineering"** koji je otežavao učenje studentima koji koriste ovu edukativnu platformu.
+
+**Zašto HTTP Stream?**
+1. **Jednostavnost:** Protokol je čist i razumljiv, što je ključno za edukativnu platformu.
+2. **Lakši Debugging:** Video feed je dostupan direktno u browseru bez kompleksne signalizacije.
+3. **Manje Opterećenje:** Uklanjanjem WebRTC stack-a, oslobođeni su resursi procesora za bržu obradu komandi kretanja.
+---
 
 ## 🚀 Ključni Moduli
 
-### 🛰️ Real-Time Komunikacija
-* **UDP Command Center:** Asinhrona obrada komandi kretanja na portu `1606`. Optimizovano za minimalni jitter u kontroli motora.
-* **WebRTC Vision Engine:** P2P video striming niskih latencija putem WebRTC `/offer` endpointa na portu `1607`.
+### 🛰️ Komunikacija
+* **UDP Command Center:** Zadržan kao najbrži način za slanje komandi kretanja na portu `1606`. Optimizovano za kontrolu u realnom vremenu.
+* **HTTP Video Server:** Streamer na portu `1607`. Koristi `multipart/x-mixed-replace` standard za prenos frejmova direktno sa kamere.
 
-### 📸 Vision & Safety Engineering
-* **Shared Camera Track:** Arhitektura omogućava da N WebRTC klijenata istovremeno prate strim koristeći jedan jedini memorijski bafer, čime se drastično smanjuje opterećenje procesora ($O(1)$ scaling).
-* **Motor Watchdog:** Fail-safe mehanizam koji automatski gasi PWM signale ukoliko mrežna komunikacija kasni više od 0.5 sekundi.
+### 📸 Vision & Safety
+* **Shared Camera Track:** Arhitektura omogućava da više klijenata istovremeno prati strim bez dupliranja opterećenja na procesoru.
+* **Motor Watchdog:** Sigurnosni mehanizam koji automatski zaustavlja PWM signale ako mrežna komunikacija kasni više od 0.5 sekundi (fail-safe).
 
 ---
 
-## ⚙️ Brzi Start (Deployment)
+## 🛠 Tehnološki Stack
 
-Za pokretanje servera na Raspberry Pi 5 uređaju:
-
-```bash
-# 1. Kloniranje projekta
-git clone https://github.com/yoloprojekat/rpi-server.git
-
-cd rpi-server
-
-# 2. Build i pokretanje u pozadini
-docker compose up --build -d
-
-# 3. Provera logova u realnom vremenu
-docker compose logs -f
-```
-### 🛠 Tehnološki Stack
-
-Sistem je strukturiran u slojevima kako bi se osigurale maksimalne performanse na Raspberry Pi 5 hardveru uz potpunu izolaciju softverskih zavisnosti.
+Sistem je strukturiran tako da osigura maksimalne performanse na RPi 5 hardveru uz potpunu izolaciju softvera.
 
 | Komponenta | Tehnologija | Uloga u Sistemu |
 | :--- | :--- | :--- |
-| **Virtualizacija** | **Docker** (Debian 13 Trixie) | Izolacija zavisnosti i $O(1)$ deployment |
-| **Runtime** | **Python 3.13** (Asyncio) | Asinhrona orkestracija procesa i I/O operacija |
-| **Video Engine** | **Picamera2** & **PyAV** | Nativni capture i procesiranje frejmova |
-| **Streaming** | **WebRTC** (`aiortc`) | P2P video prenos ultra-niske latencije |
-| **Kontrola** | **UDP Sockets** | Low-latency prenos komandi kretanja |
-| **Hardware I/O** | **lgpio** / **gpiozero** | Precizna PWM i digitalna kontrola pinova |
-
-
+| **Virtualizacija** | **Docker** (Debian 13) | Izolacija zavisnosti i instant deployment |
+| **Runtime** | **Python 3.13** | Glavni mozak sistema (asinhrono izvršavanje) |
+| **Video Engine** | **Picamera2** | Direktna kontrola RPi 5 kamere |
+| **Streaming** | **HTTP MJPEG** | Jednostavan i robustan video prenos |
+| **Kontrola** | **UDP Sockets** | Prenos komandi kretanja bez zastoja |
+| **Hardware I/O** | **lgpio** | Precizna PWM kontrola motora na RPi 5 |
 
 ---
 
-### 🔌 Hardverska Mapa Pinova (BCM)
+## 🔌 Hardverska Mapa Pinova (BCM)
 
-Konfiguracija pinova je optimizovana za **Raspberry Pi 5** i **L298N** motor drajvere. Za kontrolu se koristi BCM numeracija pinova.
+Konfiguracija pinova je optimizovana za **Raspberry Pi 5** i **L298N** motor drajvere.
 
-#### 🕹️ Kontrola Brzine (PWM)
+### 🕹️ Kontrola Brzine (PWM)
 * **Global PWM (Enable A+B):** `GPIO 18` (Fizički Pin 12) — *Frekvencija: 50Hz*
 
-#### ⚙️ Motorna Logika (Digital Output)
-Ova tabela definiše parove pinova koji kontrolišu smer rotacije svakog od četiri motora.
+### ⚙️ Motorna Logika (Digital Output)
+Definiše pinove koji kontrolišu smer rotacije četiri motora.
 
 | Pozicija Motora | Smer 1 (IN1/3) | Smer 2 (IN2/4) |
 | :--- | :--- | :--- |
@@ -94,14 +81,16 @@ Ova tabela definiše parove pinova koji kontrolišu smer rotacije svakog od čet
 | **Zadnji Levi (C)** | `GPIO 24` | `GPIO 25` |
 | **Zadnji Desni (D)** | `GPIO 5` | `GPIO 6` |
 
-
+---
 
 > [!IMPORTANT]
-> **Napomena o uzemljenju:** Prilikom povezivanja, obavezno povežite **GND** (uzemljenje) L298N drajvera sa jednim od **GND** pinova na Raspberry Pi 5. Bez zajedničkog uzemljenja, PWM signal neće biti stabilan i motori mogu raditi nepredvidivo.
+> **Napomena o uzemljenju:** Prilikom povezivanja, obavezno povežite **GND** (uzemljenje) L298N drajvera sa jednim od **GND** pinova na Raspberry Pi 5. Bez zajedničkog uzemljenja, kontrolni signali neće raditi ispravno i motori mogu postati nepredvidivi.
+
+---
+
 <div align="center">
 
-Autor: Danilo Stoletović • Mentor: Dejan Batanjac
-
-ETŠ „Nikola Tesla“ Niš • 2026
+Autor: **Danilo Stoletović** • Mentor: **Dejan Batanjac**
+**ETŠ „Nikola Tesla“ Niš • 2026**
 
 </div>
