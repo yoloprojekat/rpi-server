@@ -1,20 +1,61 @@
-version: '3.8'
+name: Release and Push RPi5 Image
 
-services:
-  rpi-server:
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
-    image: ghcr.io/yoloprojekat/rpi-server:latest
-    container_name: pametno_vozilo_server
-    restart: always
-    privileged: true
-    network_mode: "host"
-    volumes:
-      - /dev:/dev
-      - /run/udev:/run/udev:ro
-    environment:
-      - PYTHONUNBUFFERED=1
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10mb"
-        max-file: "3"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Tag Version
+        id: vars
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build and Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:${{ steps.vars.outputs.tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: Release ${{ steps.vars.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            ## 🐳 Docker Hub Image
+            Verzija za Raspberry Pi 5 je spremna.
+            
+            **Pull komanda:**
+            ```bash
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:${{ steps.vars.outputs.tag }}
+            ```
+          draft: false
+          prerelease: false

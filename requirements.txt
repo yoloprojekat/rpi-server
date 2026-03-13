@@ -2,6 +2,6 @@ aiohttp
 aiohttp_cors
 picamera2
 gpiozero
-lgpio
+lgpio      # Ovo će pip instalirati kao Python biblioteku
 numpy
 opencv-python-headless
