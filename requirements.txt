@@ -1,6 +1,5 @@
 aiohttp
 aiohttp_cors
-picamera2
 gpiozero
 lgpio
 numpy
