@@ -28,6 +28,8 @@ RUN wget -q https://github.com/joan2937/lg/archive/master.zip && \
 # 3. Upgrade pip and build Python wheels
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    # Pre-install numpy<2 here so wheel building uses the correct C-API headers
+    pip install --no-cache-dir "numpy<2" && \
     pip wheel --no-cache-dir --wheel-dir /build/wheels -r requirements.txt
 
 
@@ -35,7 +37,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 FROM python:3.11-slim-bookworm
 
 # 1. Fix PYTHONPATH and Python Behavior
-# We MUST point Docker's custom Python to the OS dist-packages so it finds libcamera
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH="/usr/lib/python3/dist-packages"
@@ -49,11 +50,8 @@ RUN ldconfig
 
 # 3. Add Raspberry Pi OS repository & Install hardware libraries
 RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg && \
-    # Fetch Raspberry Pi GPG key
     wget -qO /usr/share/keyrings/raspberrypi.asc https://archive.raspberrypi.com/debian/raspberrypi.gpg.key && \
-    # Add Raspberry Pi repository (forced to arm64 to prevent QEMU confusion)
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/raspberrypi.asc] http://archive.raspberrypi.com/debian/ bookworm main" > /etc/apt/sources.list.d/raspi.list && \
-    # Update again and install the Pi-specific camera stack + general hardware deps
     apt-get update && apt-get install -y --no-install-recommends \
     libcamera-ipa \
     libcamera-apps-lite \
@@ -66,7 +64,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg && \
     libgpiod2 \
     libglib2.0-0 \
     libgl1-mesa-glx \
-    # Clean up wget/gnupg to keep the image strictly minimal
     && apt-get purge -y wget gnupg \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
@@ -74,7 +71,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg && \
 # 4. Install Python packages from wheels
 COPY --from=builder /build/wheels /wheels
 COPY requirements.txt .
-RUN pip install --no-cache-dir /wheels/* && \
+# FIX: Force numpy to stay below v2.0 to maintain ABI compatibility with picamera2
+RUN pip install --no-cache-dir /wheels/* "numpy<2.0.0" && \
     rm -rf /wheels requirements.txt
 
 # 5. Copy application code
