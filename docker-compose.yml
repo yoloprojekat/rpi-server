@@ -1,61 +1,66 @@
-name: Release and Push RPi5 Image
-
-on:
-  push:
-    tags:
-      - 'v*'
-
-jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+services:
+  rpi-server:
+    # Replace with your actual Docker Hub image
+    image: ${DOCKERHUB_USERNAME:-yoloprojekat}/rpi-server:latest
+    container_name: rpi_stream_server
+    restart: unless-stopped
     
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+    # OPTIMIZATION 1: Host Networking
+    # Eliminates Docker's bridge network overhead, significantly reducing video stream latency.
+    # Note: 'ports' definition is ignored when using host network. It runs directly on port 1607.
+    network_mode: "host"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+    # OPTIMIZATION 2: Hardware Discovery
+    # libcamera on RPi 5 needs access to udev to correctly identify the camera module.
+    volumes:
+      - /run/udev:/run/udev:ro
+    
+    # OPTIMIZATION 3: Expanded Devices Array
+    # RPi 5 libcamera often maps across multiple video/media/subdev nodes dynamically.
+    # Mapping the typical ranges prevents "camera not found" errors after reboots.
+    devices:
+      # GPIO devices
+      - "/dev/gpiomem:/dev/gpiomem"
+      - "/dev/gpiochip4:/dev/gpiochip4"
+      # Memory allocation for Picamera2
+      - "/dev/dma_heap:/dev/dma_heap"
+      # Camera subsystems
+      - "/dev/video0:/dev/video0"
+      - "/dev/video1:/dev/video1"
+      - "/dev/video2:/dev/video2"
+      - "/dev/video3:/dev/video3"
+      - "/dev/media0:/dev/media0"
+      - "/dev/media1:/dev/media1"
+      - "/dev/media2:/dev/media2"
+      - "/dev/media3:/dev/media3"
+      - "/dev/v4l-subdev0:/dev/v4l-subdev0"
+      - "/dev/v4l-subdev1:/dev/v4l-subdev1"
+      - "/dev/v4l-subdev2:/dev/v4l-subdev2"
+      - "/dev/v4l-subdev3:/dev/v4l-subdev3"
+    
+    # Ensure container user has correct permissions
+    group_add:
+      - video
+      - gpio
+      - dialout
+      - plugdev
       
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+    # Increased shared memory to prevent OpenCV/Picamera2 allocation crashes
+    shm_size: '512m'
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+    # OPTIMIZATION 4: Log Rotation
+    # Prevents Docker logs from filling up and wearing out the Raspberry Pi's SD Card.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-      - name: Extract Tag Version
-        id: vars
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Build and Push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/arm64
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:${{ steps.vars.outputs.tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.vars.outputs.tag }}
-          name: Release ${{ steps.vars.outputs.tag }}
-          generate_release_notes: true
-          body: |
-            ## 🐳 Docker Hub Image
-            Verzija za Raspberry Pi 5 je spremna.
-            
-            **Pull komanda:**
-            ```bash
-            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:${{ steps.vars.outputs.tag }}
-            ```
-          draft: false
-          prerelease: false
+    # OPTIMIZATION 5: Auto-Recovery Healthcheck
+    # Restarts the container automatically if the HTTP stream stops responding.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1607/video_feed"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

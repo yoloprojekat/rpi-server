@@ -3,70 +3,64 @@ name: Release and Push RPi5 Image
 on:
   push:
     tags:
-      - 'v*' # Okidač je bilo koji tag koji počinje sa 'v' (npr. v1.0.2)
+      - 'v*'
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Neophodno za kreiranje GitHub Release-a
+      contents: write
     
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 1. Postavljanje alata za Multi-Arch Build (ARM64 za RPi 5)
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 2. Login na Docker Hub koristeći Secrets
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 3. Ekstrakcija čiste verzije taga
-      - name: Get tag version
-        id: vars
-        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      # OPTIMIZATION: Use Docker's official action to handle tags cleanly
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
 
-      # 4. Build i Push na Docker Hub
       - name: Build and Push
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/arm64
           push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:${{ steps.vars.outputs.tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:latest
-          # Optimizacija keša da build traje kraće sledeći put
+          # Tags and labels are automatically injected here
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 5. Kreiranje zvaničnog GitHub Release-a sa informacijama o imidžu
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.vars.outputs.tag }}
-          name: Release ${{ steps.vars.outputs.tag }}
-          generate_release_notes: true # Automatski dodaje listu commit-ova u release
+          # OPTIMIZATION: Use GitHub's native variable for the tag name
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
           body: |
-            ## 🐳 Docker Hub Informacije
-            Verzija za Raspberry Pi 5 je uspešno postavljena.
+            ## 🐳 Docker Hub Image
+            Verzija za Raspberry Pi 5 je spremna.
             
-            **Komanda za preuzimanje:**
+            **Pull komanda:**
             ```bash
-            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:${{ steps.vars.outputs.tag }}
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/rpi-server:${{ github.ref_name }}
             ```
-            
-            **Detalji:**
-            - **Arhitektura:** `linux/arm64` (RPi 5 optimizovano)
-            - **OS:** Debian 13 (Trixie)
-            - **Status:** Stable Release
-          draft: false
-          prerelease: false
