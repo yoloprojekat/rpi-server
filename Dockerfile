@@ -1,6 +1,4 @@
-# ==========================================
 # Stage 1: Builder
-# ==========================================
 FROM python:3.11-slim-bookworm AS builder
 
 WORKDIR /build
@@ -17,7 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     ninja-build \
     libcap-dev \
-    libcamera-dev \
     libgpiod-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,24 +25,20 @@ RUN wget -q https://github.com/joan2937/lg/archive/master.zip && \
     strip --strip-unneeded /usr/local/lib/lib*.so* && \
     cd .. && rm -rf master.zip lg-master
 
-# 3. Upgrade pip/setuptools and build Python wheels
+# 3. Upgrade pip and build Python wheels
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip wheel --no-cache-dir --wheel-dir /build/wheels -r requirements.txt
 
 
-# ==========================================
 # Stage 2: Final Runtime
-# ==========================================
 FROM python:3.11-slim-bookworm
 
-# 1. Set environment variables early
+# 1. Fix PYTHONPATH and Python Behavior
+# We MUST point Docker's custom Python to the OS dist-packages so it finds libcamera
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
-# CRUCIAL ADDITION: Point the container's Python environment to the system packages directory
-# Without this, Python 3.11 won't see the apt-installed libcamera and picamera2 modules.
-ENV PYTHONPATH="/usr/lib/python3/dist-packages:${PYTHONPATH}"
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH="/usr/lib/python3/dist-packages"
 
 WORKDIR /app
 
@@ -54,29 +47,37 @@ COPY --from=builder /usr/local/lib/lib*.so* /usr/local/lib/
 COPY --from=builder /usr/local/include/lgpio.h /usr/local/include/
 RUN ldconfig
 
-# 3. Install ONLY runtime libraries
-# Merged your existing runtime libraries with the required libcamera Python bindings
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 3. Add Raspberry Pi OS repository & Install hardware libraries
+RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg && \
+    # Fetch Raspberry Pi GPG key
+    wget -qO /usr/share/keyrings/raspberrypi.asc https://archive.raspberrypi.com/debian/raspberrypi.gpg.key && \
+    # Add Raspberry Pi repository (forced to arm64 to prevent QEMU confusion)
+    echo "deb [arch=arm64 signed-by=/usr/share/keyrings/raspberrypi.asc] http://archive.raspberrypi.com/debian/ bookworm main" > /etc/apt/sources.list.d/raspi.list && \
+    # Update again and install the Pi-specific camera stack + general hardware deps
+    apt-get update && apt-get install -y --no-install-recommends \
     libcamera-ipa \
+    libcamera-apps-lite \
+    python3-libcamera \
+    python3-kms++ \
+    python3-picamera2 \
     libwebcam0 \
     libcap2 \
     gpiod \
     libgpiod2 \
     libglib2.0-0 \
     libgl1-mesa-glx \
-    libcamera-apps-lite \
-    python3-libcamera \
-    python3-kms++ \
-    python3-picamera2 \
+    # Clean up wget/gnupg to keep the image strictly minimal
+    && apt-get purge -y wget gnupg \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. Install Python packages from wheels and clean up immediately
+# 4. Install Python packages from wheels
 COPY --from=builder /build/wheels /wheels
 COPY requirements.txt .
 RUN pip install --no-cache-dir /wheels/* && \
     rm -rf /wheels requirements.txt
 
-# 5. Copy application code last
+# 5. Copy application code
 COPY . .
 
 CMD ["python", "main.py"]
