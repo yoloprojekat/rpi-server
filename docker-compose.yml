@@ -1,66 +1,59 @@
 services:
+
   rpi-server:
-    # Replace with your actual Docker Hub image
-    image: ${DOCKERHUB_USERNAME:-yoloprojekat}/rpi-server:latest
+
+    # Replace 'your_dockerhub_username' with your actual Docker Hub username
+
+    image: yoloprojekat/rpi-server:latest
+
     container_name: rpi_stream_server
+
     restart: unless-stopped
-    
-    # OPTIMIZATION 1: Host Networking
-    # Eliminates Docker's bridge network overhead, significantly reducing video stream latency.
-    # Note: 'ports' definition is ignored when using host network. It runs directly on port 1607.
+
+    # Host networking for zero-latency MJPEG streaming (runs directly on port 1607)
+
     network_mode: "host"
 
-    # OPTIMIZATION 2: Hardware Discovery
-    # libcamera on RPi 5 needs access to udev to correctly identify the camera module.
+    # Grants required permissions for dynamic hardware (libcamera, dma_heap, gpio)
+
+    privileged: true
+
+    # Mounts the entire /dev tree so dynamic camera nodes are always accessible
+
     volumes:
+
       - /run/udev:/run/udev:ro
-    
-    # OPTIMIZATION 3: Expanded Devices Array
-    # RPi 5 libcamera often maps across multiple video/media/subdev nodes dynamically.
-    # Mapping the typical ranges prevents "camera not found" errors after reboots.
-    devices:
-      # GPIO devices
-      - "/dev/gpiomem:/dev/gpiomem"
-      - "/dev/gpiochip4:/dev/gpiochip4"
-      # Memory allocation for Picamera2
-      - "/dev/dma_heap:/dev/dma_heap"
-      # Camera subsystems
-      - "/dev/video0:/dev/video0"
-      - "/dev/video1:/dev/video1"
-      - "/dev/video2:/dev/video2"
-      - "/dev/video3:/dev/video3"
-      - "/dev/media0:/dev/media0"
-      - "/dev/media1:/dev/media1"
-      - "/dev/media2:/dev/media2"
-      - "/dev/media3:/dev/media3"
-      - "/dev/v4l-subdev0:/dev/v4l-subdev0"
-      - "/dev/v4l-subdev1:/dev/v4l-subdev1"
-      - "/dev/v4l-subdev2:/dev/v4l-subdev2"
-      - "/dev/v4l-subdev3:/dev/v4l-subdev3"
-    
-    # Ensure container user has correct permissions
-    group_add:
-      - video
-      - gpio
-      - dialout
-      - plugdev
-      
-    # Increased shared memory to prevent OpenCV/Picamera2 allocation crashes
+
+      - /dev:/dev
+
+    # Hardware access permissions for the container (kept for good measure)
+
+    # Increased shared memory to prevent camera frame buffer crashes
+
     shm_size: '512m'
 
-    # OPTIMIZATION 4: Log Rotation
-    # Prevents Docker logs from filling up and wearing out the Raspberry Pi's SD Card.
+    # SD Card Protection: limits log size to prevent filling up the drive
+
     logging:
+
       driver: "json-file"
+
       options:
+
         max-size: "10m"
+
         max-file: "3"
 
-    # OPTIMIZATION 5: Auto-Recovery Healthcheck
-    # Restarts the container automatically if the HTTP stream stops responding.
+    # Auto-recovery if the HTTP stream stops responding
+
     healthcheck:
+
       test: ["CMD", "curl", "-f", "http://localhost:1607/video_feed"]
+
       interval: 30s
+
       timeout: 10s
+
       retries: 3
+
       start_period: 15s
