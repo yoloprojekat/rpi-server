@@ -4,7 +4,7 @@ FROM python:3.11-slim-bookworm AS builder
 WORKDIR /build
 
 # 1. Install build-only dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
     swig \
@@ -49,10 +49,10 @@ COPY --from=builder /usr/local/include/lgpio.h /usr/local/include/
 RUN ldconfig
 
 # 3. Add Raspberry Pi OS repository & Install hardware libraries
-RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg && \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends wget gnupg && \
     wget -qO /usr/share/keyrings/raspberrypi.asc https://archive.raspberrypi.com/debian/raspberrypi.gpg.key && \
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/raspberrypi.asc] http://archive.raspberrypi.com/debian/ bookworm main" > /etc/apt/sources.list.d/raspi.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
+    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     libcamera-ipa \
     libcamera-apps-lite \
     python3-libcamera \
