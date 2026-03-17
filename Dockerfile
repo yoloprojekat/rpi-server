@@ -37,6 +37,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 FROM python:3.11-slim-bookworm
 
 # 1. Fix PYTHONPATH and Python Behavior
+# This points Docker's Python to the OS packages so it finds the apt-installed libcamera
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH="/usr/lib/python3/dist-packages"
@@ -48,7 +49,7 @@ COPY --from=builder /usr/local/lib/lib*.so* /usr/local/lib/
 COPY --from=builder /usr/local/include/lgpio.h /usr/local/include/
 RUN ldconfig
 
-# 3. Add Raspberry Pi OS repository & Install hardware libraries
+# 3. Add Raspberry Pi OS repository & Install hardware libraries (INCLUDING picamera2)
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends wget gnupg && \
     wget -qO /usr/share/keyrings/raspberrypi.asc https://archive.raspberrypi.com/debian/raspberrypi.gpg.key && \
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/raspberrypi.asc] http://archive.raspberrypi.com/debian/ bookworm main" > /etc/apt/sources.list.d/raspi.list && \
@@ -68,11 +69,11 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. Install Python packages from wheels
+# 4. Install Python packages from wheels and patch vulnerabilities
+# pip overrides the apt-installed pillow with the secure version, and fixes the numpy ABI
 COPY --from=builder /build/wheels /wheels
 COPY requirements.txt .
-# FIX: Force numpy to stay below v2.0 to maintain ABI compatibility with picamera2
-RUN pip install --no-cache-dir /wheels/* "numpy<2.0.0" && \
+RUN pip install --no-cache-dir /wheels/* "numpy<2.0.0" "pillow>=10.2.0" && \
     rm -rf /wheels requirements.txt
 
 # 5. Copy application code
