@@ -49,7 +49,7 @@ COPY --from=builder /usr/local/lib/lib*.so* /usr/local/lib/
 COPY --from=builder /usr/local/include/lgpio.h /usr/local/include/
 RUN ldconfig
 
-# 3. Add Raspberry Pi OS repository & Install hardware libraries (INCLUDING picamera2)
+# 3. Add Raspberry Pi OS repository & Install hardware libraries (INCLUDING picamera2 & Pi 5 GPIO)
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends wget gnupg && \
     wget -qO /usr/share/keyrings/raspberrypi.asc https://archive.raspberrypi.com/debian/raspberrypi.gpg.key && \
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/raspberrypi.asc] http://archive.raspberrypi.com/debian/ bookworm main" > /etc/apt/sources.list.d/raspi.list && \
@@ -59,6 +59,8 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     python3-libcamera \
     python3-kms++ \
     python3-picamera2 \
+    python3-lgpio \
+    python3-gpiozero \
     libwebcam0 \
     libcap2 \
     gpiod \
