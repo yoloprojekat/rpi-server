@@ -131,7 +131,10 @@ async def video_feed(request: web.Request):
                     b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
                 )
                 await response.write(frame_data)
-    except (ConnectionResetError, BrokenPipeError, aiohttp.web.ClientDisconnectedError):
+    # ---------------------------------------------------------------------------------
+    # THE FIX IS HERE: Changed aiohttp.web.ClientDisconnectedError to aiohttp.ClientDisconnectedError
+    # ---------------------------------------------------------------------------------
+    except (ConnectionResetError, BrokenPipeError, aiohttp.ClientDisconnectedError):
         # Gracefully handle normal client disconnections
         logger.info(f"Klijent {request.remote} prekinuo stream.")
     except Exception as e:
