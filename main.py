@@ -73,7 +73,7 @@ def capture_and_encode(picam2: Picamera2) -> bytes | None:
     """Synchronous function. Uses hardware MJPEG stream to bypass CPU encoding."""
     try:
         # We fetch the frame from the 'main' stream which is configured as MJPEG.
-        # It is ALREADY a compressed JPEG byte string, so we skip OpenCV entirely!
+        # It is ALREADY a compressed JPEG byte string. Zero CPU processing cost!
         frame_data = picam2.capture_array("main")
         return frame_data.tobytes()
     except Exception as e:
@@ -206,7 +206,7 @@ async def main():
     await site.start()
 
     logger.info("------------------------------------------")
-    logger.info("RPI-SERVER [Debian 13] Online!")
+    logger.info("RPI-SERVER [Debian 13] Online! (Hardware Accelerated)")
     logger.info("Video Stream: http://pametno-vozilo.local:1607/video_feed")
     logger.info("------------------------------------------")
     
