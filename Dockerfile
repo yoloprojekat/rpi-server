@@ -5,7 +5,6 @@ FROM python:3.11-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH="/usr/lib/python3/dist-packages" \
-    PYTHON_JIT=1
 
 WORKDIR /app
 
