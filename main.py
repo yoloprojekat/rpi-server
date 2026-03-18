@@ -4,6 +4,7 @@ import time
 import sys
 import cv2
 import numpy as np
+import aiohttp
 from aiohttp import web
 import aiohttp_cors
 from gpiozero import PWMOutputDevice, DigitalOutputDevice
@@ -22,6 +23,7 @@ try:
     
     # Motor Logic Pins (BCM mapping)
     # Order: A1, A2, B1, B2, C1, C2, D1, D2
+    # This matches your working native script: 17, 27, 22, 23, 24, 25, 5, 6
     motor_pins = [DigitalOutputDevice(p, pin_factory=factory) for p in [17, 27, 22, 23, 24, 25, 5, 6]]
 except Exception as e:
     logger.error(f"Hardware initialization failed: {e}")
@@ -33,8 +35,9 @@ LATEST_FRAME = b''
 FRAME_COND = asyncio.Condition() 
 
 # --- MOVEMENT LOGIC & CONSTANTS ---
-SPEED_NORMAL = 0.8
-SPEED_ROTATION = 0.6
+# Adjusted down to match the working native code to prevent power brownouts
+SPEED_NORMAL = 0.3
+SPEED_ROTATION = 0.15
 
 MOVEMENTS = {
     "napred":    (1, 1, 1, 1),
@@ -60,14 +63,14 @@ def set_motor_state(in1, in2, state):
         in2.off()
 
 def stop_motors():
-    if ENABCD.value != 0:
-        ENABCD.value = 0
+    ENABCD.value = 0
     for pin in motor_pins: 
         pin.off()
 
 def execute_move(states, duty_cycle=SPEED_NORMAL):
-    if ENABCD.value != duty_cycle:  # Prevent redundant I/O calls
-        ENABCD.value = duty_cycle
+    # FORCE write to the pin every time (bypasses Docker GPIO state-read desyncs)
+    ENABCD.value = duty_cycle
+    
     for i, state in enumerate(states):
         set_motor_state(motor_pins[i * 2], motor_pins[i * 2 + 1], state)
 
@@ -145,6 +148,7 @@ async def handle_commands(request: web.Request):
         cmd = data.get("cmd", "stop").lower()
         
         LAST_CMD_TIME = time.time()
+        logger.info(f"Primljena komanda: {cmd}")
         
         if cmd == "stop":
             stop_motors()
