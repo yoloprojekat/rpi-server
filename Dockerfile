@@ -1,16 +1,15 @@
 # syntax=docker/dockerfile:1
+# Downgraded to 3.11 to perfectly match the Raspberry Pi OS hardware binaries
 FROM python:3.11-slim-bookworm
 
-# 1. Environment & JIT Setup
+# 1. Environment Setup
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH="/usr/lib/python3/dist-packages" \
+    PYTHONPATH="/usr/lib/python3/dist-packages"
 
 WORKDIR /app
 
 # 2. The "Single-Pass" System Install
-# We combine the repo setup, package install, and cleanup into ONE layer.
-# This prevents Docker from creating intermediate snapshots on the SD card.
 RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg && \
     wget -qO /usr/share/keyrings/raspberrypi.asc https://archive.raspberrypi.com/debian/raspberrypi.gpg.key && \
     echo "deb [arch=arm64 signed-by=/usr/share/keyrings/raspberrypi.asc] http://archive.raspberrypi.com/debian/ bookworm main" > /etc/apt/sources.list.d/raspi.list && \
@@ -27,14 +26,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# 3. The "Single-Pass" Python Install
+# 3. The "Single-Pass" Python Install & Pillow Security Patch
 COPY requirements.txt .
-# By putting Pillow on the same line as requirements.txt, pip resolves 
-# everything in one single fast sweep instead of running twice.
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt "Pillow>=10.2.0"
 
-# 4. App Code (Must stay at the absolute bottom!)
+# 4. App Code
 COPY . .
 
 CMD ["python", "main.py"]
