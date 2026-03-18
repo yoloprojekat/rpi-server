@@ -30,8 +30,46 @@ except Exception as e:
 # --- SHARED STATE ---
 LAST_CMD_TIME = 0.0
 LATEST_FRAME = b''
-# Use Condition instead of Event to safely broadcast to multiple clients
 FRAME_COND = asyncio.Condition() 
+
+# --- MOVEMENT LOGIC & CONSTANTS ---
+SPEED_NORMAL = 0.8
+SPEED_ROTATION = 0.6
+
+MOVEMENTS = {
+    "napred":    (1, 1, 1, 1),
+    "nazad":     (-1, -1, -1, -1),
+    "levo":      (-1, 1, -1, 1),
+    "desno":     (1, -1, 1, -1),
+    "rot_levo":  (-1, -1, 1, 1),
+    "rot_desno": (1, 1, -1, -1),
+    "stop":      (0, 0, 0, 0),
+}
+
+ROTATION_CMDS = frozenset(["rot_levo", "rot_desno"])
+
+def set_motor_state(in1, in2, state):
+    if state == 1: 
+        in1.on()
+        in2.off()
+    elif state == -1: 
+        in1.off()
+        in2.on()
+    else: 
+        in1.off()
+        in2.off()
+
+def stop_motors():
+    if ENABCD.value != 0:
+        ENABCD.value = 0
+    for pin in motor_pins: 
+        pin.off()
+
+def execute_move(states, duty_cycle=SPEED_NORMAL):
+    if ENABCD.value != duty_cycle:  # Prevent redundant I/O calls
+        ENABCD.value = duty_cycle
+    for i, state in enumerate(states):
+        set_motor_state(motor_pins[i * 2], motor_pins[i * 2 + 1], state)
 
 # --- CAMERA & STREAMING LOGIC ---
 def capture_and_encode(picam2: Picamera2) -> bytes | None:
@@ -104,10 +142,20 @@ async def handle_commands(request: web.Request):
     global LAST_CMD_TIME
     try:
         data = await request.json()
-        # Logika kretanja ovde (npr. motor_pins[0].on(), itd.)
+        cmd = data.get("cmd", "stop").lower()
         
         LAST_CMD_TIME = time.time()
-        return web.json_response({"status": "ok"})
+        
+        if cmd == "stop":
+            stop_motors()
+        elif cmd in MOVEMENTS:
+            speed = SPEED_ROTATION if cmd in ROTATION_CMDS else SPEED_NORMAL
+            execute_move(MOVEMENTS[cmd], duty_cycle=speed)
+        else:
+            logger.warning(f"Unknown command received: {cmd}")
+            stop_motors()
+        
+        return web.json_response({"status": "ok", "cmd": cmd})
     except Exception as e:
         logger.error(f"Error handling command: {e}")
         return web.json_response({"error": "Bad Request"}, status=400)
@@ -115,12 +163,10 @@ async def handle_commands(request: web.Request):
 async def watchdog():
     """Shuts down motors if a command isn't received in time."""
     while True:
-        # Check if motors are active AND time has expired
-        if ENABCD.value > 0 and (time.time() - LAST_CMD_TIME > 0.5):
+        # Check if motors are active AND time has expired (2.0s for D-Pad compatibility)
+        if ENABCD.value > 0 and (time.time() - LAST_CMD_TIME > 2.0):
             logger.warning("Watchdog: Sigurnosno zaustavljanje zbog gubitka signala.")
-            ENABCD.value = 0
-            for pin in motor_pins:
-                pin.off()
+            stop_motors()
         await asyncio.sleep(0.1)
 
 # --- MAIN ENTRY ---
@@ -162,7 +208,7 @@ async def main():
 
     logger.info("------------------------------------------")
     logger.info("RPI-SERVER [Debian 13] Online!")
-    logger.info("Video Stream: http://<RPi_IP_Adresa>:1607/video_feed")
+    logger.info("Video Stream: http://pametno-vozilo.local:1607/video_feed")
     logger.info("------------------------------------------")
     
     # Keep the server running infinitely
@@ -176,9 +222,7 @@ if __name__ == "__main__":
     finally:
         # Ensure hardware safely turns off upon exit
         try:
-            ENABCD.value = 0
-            for pin in motor_pins:
-                pin.off()
+            stop_motors()
             factory.close()
         except NameError:
             pass
