@@ -33,6 +33,7 @@ LAST_CMD_TIME = 0.0
 LATEST_FRAME = b''           # Raw JPEG bytes for streaming
 DETECTION_RESULTS = None     # Shared YOLO boxes
 FRAME_COND = asyncio.Condition() 
+FRAME_COUNT = 0  # Add this to track frames for throttling
 
 IS_DETECTION_ON = False      # Toggle for drawing boxes/names
 IS_FOLLOW_ON = False         # Toggle for motor movement
@@ -120,14 +121,18 @@ async def yolo_detection_loop():
 
 # --- CAMERA & STREAMING LOGIC ---
 def capture_and_encode(picam2: Picamera2) -> bytes | None:
-    global DETECTION_RESULTS, IS_DETECTION_ON
+    global DETECTION_RESULTS, IS_DETECTION_ON, FRAME_COUNT
     try:
         raw_frame = picam2.capture_array("main")
         img = cv2.cvtColor(raw_frame, cv2.COLOR_RGB2BGR)
-        h, w, _ = img.shape
+        
+        # Increment frame counter
+        FRAME_COUNT = (FRAME_COUNT + 1) % 25 
 
-        # Only draw if AI Vision is toggled on
-        if IS_DETECTION_ON:
+        # ONLY DRAW 5 TIMES PER SECOND (Every 5th frame)
+        # This keeps the video smooth but the AI overlay efficient
+        if IS_DETECTION_ON and (FRAME_COUNT % 5 == 0):
+            h, w, _ = img.shape
             # Draw Dead Zone Guides
             cv2.line(img, (int(w * 0.35), 0), (int(w * 0.35), h), (255, 255, 255), 1)
             cv2.line(img, (int(w * 0.65), 0), (int(w * 0.65), h), (255, 255, 255), 1)
@@ -135,18 +140,11 @@ def capture_and_encode(picam2: Picamera2) -> bytes | None:
             if DETECTION_RESULTS is not None:
                 for box in DETECTION_RESULTS:
                     b = box.xyxy[0].cpu().numpy().astype(int)
-                    cls_id = int(box.cls[0])
-                    label_name = model.names[cls_id].upper()
-                    conf = float(box.conf[0])
-                    label_str = f"{label_name} {conf:.2f}"
-
-                    # Draw Bounding Box (Neon Green)
+                    label_name = model.names[int(box.cls[0])].upper()
+                    # Draw Bounding Box
                     cv2.rectangle(img, (b[0], b[1]), (b[2], b[3]), (0, 255, 127), 2)
-                    
-                    # Draw Label
-                    (tw, th), _ = cv2.getTextSize(label_str, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                    cv2.rectangle(img, (b[0], b[1] - th - 10), (b[0] + tw, b[1]), (0, 255, 127), -1)
-                    cv2.putText(img, label_str, (b[0], b[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                    cv2.putText(img, label_name, (b[0], b[1] - 5), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 127), 2)
 
         success, buffer = cv2.imencode('.jpg', img)
         if success: return buffer.tobytes()
