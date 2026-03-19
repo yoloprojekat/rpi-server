@@ -2,12 +2,15 @@ import asyncio
 import logging
 import time
 import sys
+import io
 import aiohttp
 from aiohttp import web
 import aiohttp_cors
 from gpiozero import PWMOutputDevice, DigitalOutputDevice
 from gpiozero.pins.lgpio import LGPIOFactory
 from picamera2 import Picamera2
+from picamera2.encoders import MJPEGEncoder
+from picamera2.outputs import FileOutput
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -20,7 +23,6 @@ try:
     ENABCD = PWMOutputDevice(18, frequency=50, pin_factory=factory)
     
     # Motor Logic Pins (BCM mapping)
-    # Order: A1, A2, B1, B2, C1, C2, D1, D2
     motor_pins = [DigitalOutputDevice(p, pin_factory=factory) for p in [17, 27, 22, 23, 24, 25, 5, 6]]
 except Exception as e:
     logger.error(f"Hardware initialization failed: {e}")
@@ -68,36 +70,26 @@ def execute_move(states, duty_cycle=SPEED_NORMAL):
     for i, state in enumerate(states):
         set_motor_state(motor_pins[i * 2], motor_pins[i * 2 + 1], state)
 
-# --- CAMERA & STREAMING LOGIC ---
-def capture_and_encode(picam2: Picamera2) -> bytes | None:
-    """Synchronous function. Uses hardware MJPEG stream to bypass CPU encoding."""
-    try:
-        # We fetch the frame from the 'main' stream which is configured as MJPEG.
-        # It is ALREADY a compressed JPEG byte string. Zero CPU processing cost!
-        frame_data = picam2.capture_array("main")
-        return frame_data.tobytes()
-    except Exception as e:
-        logger.error(f"Hardware Encoding Error: {e}")
-    return None
+# --- CAMERA HARDWARE CALLBACK ---
+class AsyncStreamingOutput(io.BufferedIOBase):
+    """
+    This class catches the hardware-encoded JPEG bytes from the Pi 5's encoder 
+    (which runs in a C++ background thread) and bridges them into our Python asyncio loop.
+    """
+    def __init__(self, loop):
+        super().__init__()
+        self.loop = loop
 
-async def camera_loop(picam2: Picamera2):
-    """Captures frames from the camera and safely broadcasts them."""
-    global LATEST_FRAME
-    while True:
-        try:
-            # Offload blocking capture to a separate thread
-            frame_bytes = await asyncio.to_thread(capture_and_encode, picam2)
-            
-            if frame_bytes:
-                async with FRAME_COND:
-                    LATEST_FRAME = frame_bytes
-                    FRAME_COND.notify_all() # Notify all connected clients at once
-            
-            # 0.033 seconds = ~30 FPS pacing
-            await asyncio.sleep(0.033)  
-        except Exception as e:
-            logger.error(f"Camera Loop Error: {e}")
-            await asyncio.sleep(1)
+    def write(self, buf):
+        global LATEST_FRAME
+        LATEST_FRAME = bytes(buf)
+        # Fire a thread-safe signal to the asyncio loop to wake up all connected phones
+        asyncio.run_coroutine_threadsafe(self._notify(), self.loop)
+        return len(buf)
+
+    async def _notify(self):
+        async with FRAME_COND:
+            FRAME_COND.notify_all()
 
 async def video_feed(request: web.Request):
     """HTTP endpoint serving the MJPEG stream."""
@@ -116,7 +108,7 @@ async def video_feed(request: web.Request):
     try:
         while True:
             async with FRAME_COND:
-                await FRAME_COND.wait() # Wait for the next frame signal
+                await FRAME_COND.wait() # Wait for the hardware interrupt signal
                 frame = LATEST_FRAME
             
             if frame:
@@ -126,7 +118,6 @@ async def video_feed(request: web.Request):
                 )
                 await response.write(frame_data)
     except (ConnectionResetError, BrokenPipeError, aiohttp.ClientDisconnectedError):
-        # Gracefully handle normal client disconnections
         logger.info(f"Klijent {request.remote} prekinuo stream.")
     except Exception as e:
         logger.error(f"Stream error for {request.remote}: {e}")
@@ -161,7 +152,6 @@ async def handle_commands(request: web.Request):
 async def watchdog():
     """Shuts down motors if a command isn't received in time."""
     while True:
-        # Check if motors are active AND time has expired (2.0s for D-Pad compatibility)
         if ENABCD.value > 0 and (time.monotonic() - LAST_CMD_TIME > 2.0):
             logger.warning("Watchdog: Sigurnosno zaustavljanje zbog gubitka signala.")
             stop_motors()
@@ -169,15 +159,21 @@ async def watchdog():
 
 # --- MAIN ENTRY ---
 async def main():
+    loop = asyncio.get_running_loop()
+
     # Hardware Accelerated Camera Initialization
     picam2 = Picamera2()
-    # Set format to MJPEG so the Pi 5 ISP handles the compression, not the CPU.
-    config = picam2.create_video_configuration(main={"size": (640, 480), "format": "MJPEG"})
+    
+    # 1. Let the ISP configure the optimal raw stream for 640x480
+    config = picam2.create_video_configuration(main={"size": (640, 480)})
     picam2.configure(config)
     picam2.start()
 
+    # 2. Attach the separate hardware MJPEG encoder and pipe it to our async output
+    stream_output = AsyncStreamingOutput(loop)
+    picam2.start_recording(MJPEGEncoder(), FileOutput(stream_output))
+
     # Start background tasks
-    asyncio.create_task(camera_loop(picam2))
     asyncio.create_task(watchdog())
 
     # Web Server setup
@@ -206,7 +202,7 @@ async def main():
     await site.start()
 
     logger.info("------------------------------------------")
-    logger.info("RPI-SERVER [Debian 13] Online! (Hardware Accelerated)")
+    logger.info("RPI-SERVER [Debian 12] Online! (Hardware Accelerated)")
     logger.info("Video Stream: http://pametno-vozilo.local:1607/video_feed")
     logger.info("------------------------------------------")
     
