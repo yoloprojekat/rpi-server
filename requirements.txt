@@ -1,2 +1,4 @@
 aiohttp
 aiohttp_cors
+numpy<2.0.0
+opencv-python-headless
