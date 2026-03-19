@@ -5,6 +5,7 @@ import sys
 import io
 import aiohttp
 from aiohttp import web
+from aiohttp.client_exceptions import ClientConnectionResetError
 import aiohttp_cors
 from gpiozero import PWMOutputDevice, DigitalOutputDevice
 from gpiozero.pins.lgpio import LGPIOFactory
@@ -117,7 +118,8 @@ async def video_feed(request: web.Request):
                     b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
                 )
                 await response.write(frame_data)
-    except (ConnectionResetError, BrokenPipeError, aiohttp.ClientDisconnectedError):
+    except (ConnectionResetError, BrokenPipeError, ClientConnectionResetError):
+        # Gracefully handle normal client disconnections (like Docker healthchecks and app minimizations)
         logger.info(f"Klijent {request.remote} prekinuo stream.")
     except Exception as e:
         logger.error(f"Stream error for {request.remote}: {e}")
