@@ -28,14 +28,19 @@ except Exception as e:
     logger.error(f"Hardware initialization failed: {e}")
     sys.exit(1)
 
-# --- SHARED STATE ---
+# --- SHARED STATE (INITIALIZED) ---
 LAST_CMD_TIME = 0.0
-LATEST_FRAME = b''
+LATEST_FRAME = b''           # Raw JPEG bytes for streaming
+DETECTION_RESULTS = None     # Shared YOLO boxes
 FRAME_COND = asyncio.Condition() 
-IS_YOLO_RUNNING = False
+
+IS_DETECTION_ON = False      # Toggle for drawing boxes/names
+IS_FOLLOW_ON = False         # Toggle for motor movement
+IS_YOLO_RUNNING = False      # Master toggle (Legacy support)
 
 # --- YOLO SETUP ---
 try:
+    # Loading YOLOv26 (NMS-Free optimized)
     model = YOLO("yolo26n.pt") 
     logger.info("YOLOv26 Model Loaded Successfully.")
 except Exception as e:
@@ -77,24 +82,28 @@ def execute_move(states, duty_cycle=SPEED_NORMAL):
 # --- YOLO DETECTION & FOLLOW LOOP ---
 async def yolo_detection_loop():
     global IS_DETECTION_ON, IS_FOLLOW_ON, DETECTION_RESULTS, LAST_CMD_TIME
+    logger.info("YOLO Detection Loop Ready.")
+    
     while True:
-        # If both are off, sleep and save CPU
+        # If both AI features are off, idle to save CPU
         if not IS_DETECTION_ON and not IS_FOLLOW_ON:
             DETECTION_RESULTS = None
             await asyncio.sleep(0.5)
             continue
 
         if LATEST_FRAME:
+            # Inference on the latest camera frame
             nparr = np.frombuffer(LATEST_FRAME, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if img is not None:
                 results = model.predict(img, conf=0.4, verbose=False)
+                # Store results for the drawing function (capture_and_encode)
                 DETECTION_RESULTS = results[0].boxes if len(results) > 0 else None
                 
                 # ONLY execute movement if following is enabled
                 if IS_FOLLOW_ON and DETECTION_RESULTS is not None:
-                    # Steering logic (30% dead zone)
+                    # Steering logic (30% dead zone: 0.35 to 0.65)
                     box = DETECTION_RESULTS[0].xyxy[0].cpu().numpy()
                     center_x = (box[0] + box[2]) / 2 / img.shape[1]
                     
@@ -107,44 +116,38 @@ async def yolo_detection_loop():
                 elif IS_FOLLOW_ON and DETECTION_RESULTS is None:
                     stop_motors()
 
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05) # ~20 FPS pacing
+
 # --- CAMERA & STREAMING LOGIC ---
 def capture_and_encode(picam2: Picamera2) -> bytes | None:
-    global DETECTION_RESULTS
+    global DETECTION_RESULTS, IS_DETECTION_ON
     try:
         raw_frame = picam2.capture_array("main")
-        # Convert to BGR for OpenCV
         img = cv2.cvtColor(raw_frame, cv2.COLOR_RGB2BGR)
         h, w, _ = img.shape
 
-        # --- DRAW DEAD ZONE GUIDES (35% and 65%) ---
-        cv2.line(img, (int(w * 0.35), 0), (int(w * 0.35), h), (255, 255, 255), 1)
-        cv2.line(img, (int(w * 0.65), 0), (int(w * 0.65), h), (255, 255, 255), 1)
+        # Only draw if AI Vision is toggled on
+        if IS_DETECTION_ON:
+            # Draw Dead Zone Guides
+            cv2.line(img, (int(w * 0.35), 0), (int(w * 0.35), h), (255, 255, 255), 1)
+            cv2.line(img, (int(w * 0.65), 0), (int(w * 0.65), h), (255, 255, 255), 1)
 
-        # --- DRAW YOLO BOXES & NAMES ---
-        if DETECTION_RESULTS is not None:
-            for box in DETECTION_RESULTS:
-                # 1. Get coordinates
-                b = box.xyxy[0].cpu().numpy().astype(int)
-                
-                # 2. Get Class Name and Confidence
-                cls_id = int(box.cls[0])
-                label_name = model.names[cls_id]
-                conf = float(box.conf[0])
-                label_str = f"{label_name.upper()} {conf:.2f}"
+            if DETECTION_RESULTS is not None:
+                for box in DETECTION_RESULTS:
+                    b = box.xyxy[0].cpu().numpy().astype(int)
+                    cls_id = int(box.cls[0])
+                    label_name = model.names[cls_id].upper()
+                    conf = float(box.conf[0])
+                    label_str = f"{label_name} {conf:.2f}"
 
-                # 3. Draw Bounding Box (Neon Green)
-                cv2.rectangle(img, (b[0], b[1]), (b[2], b[3]), (0, 255, 127), 2)
+                    # Draw Bounding Box (Neon Green)
+                    cv2.rectangle(img, (b[0], b[1]), (b[2], b[3]), (0, 255, 127), 2)
+                    
+                    # Draw Label
+                    (tw, th), _ = cv2.getTextSize(label_str, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(img, (b[0], b[1] - th - 10), (b[0] + tw, b[1]), (0, 255, 127), -1)
+                    cv2.putText(img, label_str, (b[0], b[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
-                # 4. Draw Label Background (Small filled rectangle)
-                (tw, th), _ = cv2.getTextSize(label_str, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                cv2.rectangle(img, (b[0], b[1] - th - 10), (b[0] + tw, b[1]), (0, 255, 127), -1)
-
-                # 5. Write Name Text
-                cv2.putText(img, label_str, (b[0], b[1] - 5), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-
-        # Encode back to JPEG for the MJPEG stream
         success, buffer = cv2.imencode('.jpg', img)
         if success: return buffer.tobytes()
     except Exception as e:
@@ -195,23 +198,11 @@ async def handle_commands(request: web.Request):
         return web.json_response({"status": "ok", "cmd": cmd})
     except Exception: return web.json_response({"error": "Bad Request"}, status=400)
 
-async def start_yolo(request: web.Request):
-    global IS_YOLO_RUNNING
-    IS_YOLO_RUNNING = True
-    logger.info("YOLO Auto-Pilot Engaged")
-    return web.json_response({"status": "YOLO26 Started"})
-
-async def stop_yolo(request: web.Request):
-    global IS_YOLO_RUNNING
-    IS_YOLO_RUNNING = False
-    stop_motors()
-    logger.info("YOLO Auto-Pilot Disengaged")
-    return web.json_response({"status": "YOLO26 Stopped"})
-
 async def toggle_detection(request: web.Request):
     global IS_DETECTION_ON
     data = await request.json()
     IS_DETECTION_ON = data.get("enable", False)
+    logger.info(f"AI Vision Toggled: {IS_DETECTION_ON}")
     return web.json_response({"detection": IS_DETECTION_ON})
 
 async def toggle_follow(request: web.Request):
@@ -219,6 +210,7 @@ async def toggle_follow(request: web.Request):
     data = await request.json()
     IS_FOLLOW_ON = data.get("enable", False)
     if not IS_FOLLOW_ON: stop_motors()
+    logger.info(f"AI Following Toggled: {IS_FOLLOW_ON}")
     return web.json_response({"follow": IS_FOLLOW_ON})
 
 async def watchdog():
@@ -243,15 +235,15 @@ async def main():
         "*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")
     })
 
+    # REGISTERING ROUTES
     app.router.add_get('/video_feed', video_feed)
     app.router.add_post('/control', handle_commands)
-    app.router.add_post('/start_yolo', start_yolo)
-    app.router.add_post('/stop_yolo', stop_yolo)
+    app.router.add_post('/toggle_detection', toggle_detection)
+    app.router.add_post('/toggle_follow', toggle_follow)
     
     for route in list(app.router.routes()): cors.add(route)
 
-    runner = web.AppRunner(app)
-    await runner.setup()
+    runner = web.AppRunner(app); await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", 1607).start()
 
     logger.info("------------------------------------------")
