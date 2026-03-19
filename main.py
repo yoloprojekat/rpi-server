@@ -10,10 +10,11 @@ import aiohttp_cors
 from gpiozero import PWMOutputDevice, DigitalOutputDevice
 from gpiozero.pins.lgpio import LGPIOFactory
 from picamera2 import Picamera2
+from ultralytics import YOLO
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-logger = logging.getLogger("RPI-HTTP-STREAM")
+logger = logging.getLogger("RPI-YOLO-SERVER")
 
 # --- HARDWARE SETUP ---
 try:
@@ -21,9 +22,7 @@ try:
     # Speed Control (Enable Pin) - Global PWM on GPIO 18
     ENABCD = PWMOutputDevice(18, frequency=50, pin_factory=factory)
     
-    # Motor Logic Pins (BCM mapping)
-    # Order: A1, A2, B1, B2, C1, C2, D1, D2
-    # This matches your working native script: 17, 27, 22, 23, 24, 25, 5, 6
+    # Motor Logic Pins: A1, A2, B1, B2, C1, C2, D1, D2
     motor_pins = [DigitalOutputDevice(p, pin_factory=factory) for p in [17, 27, 22, 23, 24, 25, 5, 6]]
 except Exception as e:
     logger.error(f"Hardware initialization failed: {e}")
@@ -33,9 +32,16 @@ except Exception as e:
 LAST_CMD_TIME = 0.0
 LATEST_FRAME = b''
 FRAME_COND = asyncio.Condition() 
+IS_YOLO_RUNNING = False
+
+# --- YOLO SETUP ---
+try:
+    model = YOLO("yolo26n.pt") 
+    logger.info("YOLOv26 Model Loaded Successfully.")
+except Exception as e:
+    logger.error(f"Failed to load YOLO model: {e}")
 
 # --- MOVEMENT LOGIC & CONSTANTS ---
-# Adjusted down to match the working native code to prevent power brownouts
 SPEED_NORMAL = 0.3
 SPEED_ROTATION = 0.15
 
@@ -53,183 +59,174 @@ ROTATION_CMDS = frozenset(["rot_levo", "rot_desno"])
 
 def set_motor_state(in1, in2, state):
     if state == 1: 
-        in1.on()
-        in2.off()
+        in1.on(); in2.off()
     elif state == -1: 
-        in1.off()
-        in2.on()
+        in1.off(); in2.on()
     else: 
-        in1.off()
-        in2.off()
+        in1.off(); in2.off()
 
 def stop_motors():
     ENABCD.value = 0
-    for pin in motor_pins: 
-        pin.off()
+    for pin in motor_pins: pin.off()
 
 def execute_move(states, duty_cycle=SPEED_NORMAL):
-    # FORCE write to the pin every time (bypasses Docker GPIO state-read desyncs)
     ENABCD.value = duty_cycle
-    
     for i, state in enumerate(states):
         set_motor_state(motor_pins[i * 2], motor_pins[i * 2 + 1], state)
 
+# --- YOLO DETECTION & FOLLOW LOOP ---
+async def yolo_detection_loop():
+    """Background task that processes frames when enabled."""
+    global IS_YOLO_RUNNING, LAST_CMD_TIME
+    logger.info("YOLO Detection Loop Ready.")
+    
+    while True:
+        if not IS_YOLO_RUNNING:
+            await asyncio.sleep(0.5)
+            continue
+
+        if LATEST_FRAME:
+            # Convert bytes to OpenCV image for YOLO
+            nparr = np.frombuffer(LATEST_FRAME, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if img is not None:
+                # NMS-free YOLO26 Inference
+                results = model.predict(img, conf=0.4, verbose=False)
+                
+                found_target = False
+                for r in results:
+                    if len(r.boxes) > 0:
+                        found_target = True
+                        # Get first box: [x1, y1, x2, y2]
+                        box = r.boxes[0].xyxy[0].cpu().numpy()
+                        center_x = (box[0] + box[2]) / 2 / img.shape[1]
+                        
+                        # --- 30% DEAD ZONE LOGIC ---
+                        # Center is 0.5. Zone is 0.35 to 0.65
+                        if center_x < 0.35:
+                            cmd = "levo"
+                        elif center_x > 0.65:
+                            cmd = "desno"
+                        else:
+                            cmd = "napred"
+                        
+                        execute_move(MOVEMENTS[cmd])
+                        LAST_CMD_TIME = time.time() # Update watchdog
+                        break
+                
+                if not found_target:
+                    stop_motors()
+
+        await asyncio.sleep(0.05) # ~20 FPS inference to save CPU
+
 # --- CAMERA & STREAMING LOGIC ---
 def capture_and_encode(picam2: Picamera2) -> bytes | None:
-    """Synchronous function to handle CPU-bound image processing."""
     try:
         raw_frame = picam2.capture_array("main")
-        # Convert and encode
         success, buffer = cv2.imencode('.jpg', cv2.cvtColor(raw_frame, cv2.COLOR_RGB2BGR))
-        if success:
-            return buffer.tobytes()
-    except Exception as e:
-        logger.error(f"Encoding Error: {e}")
+        if success: return buffer.tobytes()
+    except Exception as e: logger.error(f"Encoding Error: {e}")
     return None
 
 async def camera_loop(picam2: Picamera2):
-    """Captures frames from the camera and safely broadcasts them."""
     global LATEST_FRAME
     while True:
         try:
-            # Offload blocking capture and encode to a separate thread
             frame_bytes = await asyncio.to_thread(capture_and_encode, picam2)
-            
             if frame_bytes:
                 async with FRAME_COND:
                     LATEST_FRAME = frame_bytes
-                    FRAME_COND.notify_all() # Notify all connected clients at once
-            
-            await asyncio.sleep(0.04)  # ~25 FPS pacing
+                    FRAME_COND.notify_all()
+            await asyncio.sleep(0.04)
         except Exception as e:
             logger.error(f"Camera Loop Error: {e}")
             await asyncio.sleep(1)
 
 async def video_feed(request: web.Request):
-    """HTTP endpoint serving the MJPEG stream."""
-    response = web.StreamResponse(
-        status=200,
-        reason='OK',
-        headers={
-            'Content-Type': 'multipart/x-mixed-replace;boundary=frame',
-            'Cache-Control': 'no-cache, private',
-            'Connection': 'keep-alive',
-        }
-    )
+    response = web.StreamResponse(status=200, reason='OK', headers={
+        'Content-Type': 'multipart/x-mixed-replace;boundary=frame',
+        'Cache-Control': 'no-cache, private', 'Connection': 'keep-alive',
+    })
     await response.prepare(request)
-
-    logger.info(f"Novi klijent povezan na video stream: {request.remote}")
     try:
         while True:
             async with FRAME_COND:
-                await FRAME_COND.wait() # Wait for the next frame signal
+                await FRAME_COND.wait()
                 frame = LATEST_FRAME
-            
             if frame:
-                frame_data = (
-                    b'--frame\r\n'
-                    b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
-                )
-                await response.write(frame_data)
-    # ---------------------------------------------------------------------------------
-    # THE FIX IS HERE: Changed to aiohttp.client_exceptions.ClientConnectionResetError
-    # ---------------------------------------------------------------------------------
-    except (ConnectionResetError, BrokenPipeError, aiohttp.client_exceptions.ClientConnectionResetError):
-        # Gracefully handle normal client disconnections
-        logger.info(f"Klijent {request.remote} prekinuo stream.")
-    except Exception as e:
-        logger.error(f"Stream error for {request.remote}: {e}")
-    
+                await response.write(b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+    except Exception: logger.info("Client disconnected from stream.")
     return response
 
-# --- MOTOR CONTROL & WATCHDOG ---
+# --- HTTP HANDLERS ---
 async def handle_commands(request: web.Request):
-    """HTTP command endpoint for motor control."""
     global LAST_CMD_TIME
     try:
         data = await request.json()
         cmd = data.get("cmd", "stop").lower()
-        
         LAST_CMD_TIME = time.time()
-        logger.info(f"Primljena komanda: {cmd}")
-        
-        if cmd == "stop":
-            stop_motors()
+        if cmd == "stop": stop_motors()
         elif cmd in MOVEMENTS:
             speed = SPEED_ROTATION if cmd in ROTATION_CMDS else SPEED_NORMAL
             execute_move(MOVEMENTS[cmd], duty_cycle=speed)
-        else:
-            logger.warning(f"Unknown command received: {cmd}")
-            stop_motors()
-        
         return web.json_response({"status": "ok", "cmd": cmd})
-    except Exception as e:
-        logger.error(f"Error handling command: {e}")
-        return web.json_response({"error": "Bad Request"}, status=400)
+    except Exception: return web.json_response({"error": "Bad Request"}, status=400)
+
+async def start_yolo(request: web.Request):
+    global IS_YOLO_RUNNING
+    IS_YOLO_RUNNING = True
+    logger.info("YOLO Auto-Pilot Engaged")
+    return web.json_response({"status": "YOLO26 Started"})
+
+async def stop_yolo(request: web.Request):
+    global IS_YOLO_RUNNING
+    IS_YOLO_RUNNING = False
+    stop_motors()
+    logger.info("YOLO Auto-Pilot Disengaged")
+    return web.json_response({"status": "YOLO26 Stopped"})
 
 async def watchdog():
-    """Shuts down motors if a command isn't received in time."""
     while True:
-        # Check if motors are active AND time has expired (2.0s for D-Pad compatibility)
         if ENABCD.value > 0 and (time.time() - LAST_CMD_TIME > 2.0):
-            logger.warning("Watchdog: Sigurnosno zaustavljanje zbog gubitka signala.")
+            logger.warning("Watchdog: Safety stop triggered.")
             stop_motors()
         await asyncio.sleep(0.1)
 
 # --- MAIN ENTRY ---
 async def main():
-    # Camera Initialization
     picam2 = Picamera2()
     config = picam2.create_video_configuration(main={"size": (640, 480), "format": "RGB888"})
-    picam2.configure(config)
-    picam2.start()
+    picam2.configure(config); picam2.start()
 
-    # Start background tasks
     asyncio.create_task(camera_loop(picam2))
+    asyncio.create_task(yolo_detection_loop())
     asyncio.create_task(watchdog())
 
-    # Web Server setup
     app = web.Application()
     cors = aiohttp_cors.setup(app, defaults={
-        "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*"
-        )
+        "*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")
     })
 
-    # Routes
     app.router.add_get('/video_feed', video_feed)
     app.router.add_post('/control', handle_commands)
+    app.router.add_post('/start_yolo', start_yolo)
+    app.router.add_post('/stop_yolo', stop_yolo)
     
-    # Apply CORS
-    for route in list(app.router.routes()):
-        cors.add(route)
+    for route in list(app.router.routes()): cors.add(route)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    
-    # Start server
-    site = web.TCPSite(runner, "0.0.0.0", 1607)
-    await site.start()
+    await web.TCPSite(runner, "0.0.0.0", 1607).start()
 
     logger.info("------------------------------------------")
-    logger.info("RPI-SERVER [Debian 13] Online!")
-    logger.info("Video Stream: http://pametno-vozilo.local:1607/video_feed")
+    logger.info("RPI-YOLO-SERVER Online (Port 1607)")
     logger.info("------------------------------------------")
-    
-    # Keep the server running infinitely
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Server ugašen od strane korisnika.")
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass
     finally:
-        # Ensure hardware safely turns off upon exit
-        try:
-            stop_motors()
-            factory.close()
-        except NameError:
-            pass
+        stop_motors()
+        factory.close()
