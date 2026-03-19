@@ -98,7 +98,7 @@ async def yolo_detection_loop():
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if img is not None:
-                results = model.predict(img, conf=0.4, verbose=False)
+                results = model.predict(img, conf=0.25, verbose=False)
                 # Store results for the drawing function (capture_and_encode)
                 DETECTION_RESULTS = results[0].boxes if len(results) > 0 else None
                 
