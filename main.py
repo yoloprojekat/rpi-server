@@ -76,57 +76,79 @@ def execute_move(states, duty_cycle=SPEED_NORMAL):
 
 # --- YOLO DETECTION & FOLLOW LOOP ---
 async def yolo_detection_loop():
-    """Background task that processes frames when enabled."""
-    global IS_YOLO_RUNNING, LAST_CMD_TIME
-    logger.info("YOLO Detection Loop Ready.")
-    
+    global IS_DETECTION_ON, IS_FOLLOW_ON, DETECTION_RESULTS, LAST_CMD_TIME
     while True:
-        if not IS_YOLO_RUNNING:
+        # If both are off, sleep and save CPU
+        if not IS_DETECTION_ON and not IS_FOLLOW_ON:
+            DETECTION_RESULTS = None
             await asyncio.sleep(0.5)
             continue
 
         if LATEST_FRAME:
-            # Convert bytes to OpenCV image for YOLO
             nparr = np.frombuffer(LATEST_FRAME, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if img is not None:
-                # NMS-free YOLO26 Inference
                 results = model.predict(img, conf=0.4, verbose=False)
+                DETECTION_RESULTS = results[0].boxes if len(results) > 0 else None
                 
-                found_target = False
-                for r in results:
-                    if len(r.boxes) > 0:
-                        found_target = True
-                        # Get first box: [x1, y1, x2, y2]
-                        box = r.boxes[0].xyxy[0].cpu().numpy()
-                        center_x = (box[0] + box[2]) / 2 / img.shape[1]
-                        
-                        # --- 30% DEAD ZONE LOGIC ---
-                        # Center is 0.5. Zone is 0.35 to 0.65
-                        if center_x < 0.35:
-                            cmd = "levo"
-                        elif center_x > 0.65:
-                            cmd = "desno"
-                        else:
-                            cmd = "napred"
-                        
-                        execute_move(MOVEMENTS[cmd])
-                        LAST_CMD_TIME = time.time() # Update watchdog
-                        break
-                
-                if not found_target:
+                # ONLY execute movement if following is enabled
+                if IS_FOLLOW_ON and DETECTION_RESULTS is not None:
+                    # Steering logic (30% dead zone)
+                    box = DETECTION_RESULTS[0].xyxy[0].cpu().numpy()
+                    center_x = (box[0] + box[2]) / 2 / img.shape[1]
+                    
+                    if center_x < 0.35: cmd = "levo"
+                    elif center_x > 0.65: cmd = "desno"
+                    else: cmd = "napred"
+                    
+                    execute_move(MOVEMENTS[cmd])
+                    LAST_CMD_TIME = time.time()
+                elif IS_FOLLOW_ON and DETECTION_RESULTS is None:
                     stop_motors()
 
-        await asyncio.sleep(0.05) # ~20 FPS inference to save CPU
-
+        await asyncio.sleep(0.05)
 # --- CAMERA & STREAMING LOGIC ---
 def capture_and_encode(picam2: Picamera2) -> bytes | None:
+    global DETECTION_RESULTS
     try:
         raw_frame = picam2.capture_array("main")
-        success, buffer = cv2.imencode('.jpg', cv2.cvtColor(raw_frame, cv2.COLOR_RGB2BGR))
+        # Convert to BGR for OpenCV
+        img = cv2.cvtColor(raw_frame, cv2.COLOR_RGB2BGR)
+        h, w, _ = img.shape
+
+        # --- DRAW DEAD ZONE GUIDES (35% and 65%) ---
+        cv2.line(img, (int(w * 0.35), 0), (int(w * 0.35), h), (255, 255, 255), 1)
+        cv2.line(img, (int(w * 0.65), 0), (int(w * 0.65), h), (255, 255, 255), 1)
+
+        # --- DRAW YOLO BOXES & NAMES ---
+        if DETECTION_RESULTS is not None:
+            for box in DETECTION_RESULTS:
+                # 1. Get coordinates
+                b = box.xyxy[0].cpu().numpy().astype(int)
+                
+                # 2. Get Class Name and Confidence
+                cls_id = int(box.cls[0])
+                label_name = model.names[cls_id]
+                conf = float(box.conf[0])
+                label_str = f"{label_name.upper()} {conf:.2f}"
+
+                # 3. Draw Bounding Box (Neon Green)
+                cv2.rectangle(img, (b[0], b[1]), (b[2], b[3]), (0, 255, 127), 2)
+
+                # 4. Draw Label Background (Small filled rectangle)
+                (tw, th), _ = cv2.getTextSize(label_str, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                cv2.rectangle(img, (b[0], b[1] - th - 10), (b[0] + tw, b[1]), (0, 255, 127), -1)
+
+                # 5. Write Name Text
+                cv2.putText(img, label_str, (b[0], b[1] - 5), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+
+        # Encode back to JPEG for the MJPEG stream
+        success, buffer = cv2.imencode('.jpg', img)
         if success: return buffer.tobytes()
-    except Exception as e: logger.error(f"Encoding Error: {e}")
+    except Exception as e:
+        logger.error(f"Encoding Error: {e}")
     return None
 
 async def camera_loop(picam2: Picamera2):
@@ -185,6 +207,19 @@ async def stop_yolo(request: web.Request):
     stop_motors()
     logger.info("YOLO Auto-Pilot Disengaged")
     return web.json_response({"status": "YOLO26 Stopped"})
+
+async def toggle_detection(request: web.Request):
+    global IS_DETECTION_ON
+    data = await request.json()
+    IS_DETECTION_ON = data.get("enable", False)
+    return web.json_response({"detection": IS_DETECTION_ON})
+
+async def toggle_follow(request: web.Request):
+    global IS_FOLLOW_ON
+    data = await request.json()
+    IS_FOLLOW_ON = data.get("enable", False)
+    if not IS_FOLLOW_ON: stop_motors()
+    return web.json_response({"follow": IS_FOLLOW_ON})
 
 async def watchdog():
     while True:
