@@ -18,6 +18,15 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     libgpiod-dev \
     && rm -rf /var/lib/apt/lists/*
 
+    
+# 2. Compile lgpio C library and strip debug symbols
+RUN wget -q https://github.com/joan2937/lg/archive/master.zip && \
+    unzip -q master.zip && \
+    cd lg-master && make && make install && \
+    strip --strip-unneeded /usr/local/lib/lib*.so* && \
+    cd .. && rm -rf master.zip lg-master
+
+
 # 3. Upgrade pip and build Python wheels
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
