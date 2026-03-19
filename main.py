@@ -200,10 +200,14 @@ async def handle_commands(request: web.Request):
 
 async def toggle_detection(request: web.Request):
     global IS_DETECTION_ON
-    data = await request.json()
-    IS_DETECTION_ON = data.get("enable", False)
-    logger.info(f"AI Vision Toggled: {IS_DETECTION_ON}")
-    return web.json_response({"detection": IS_DETECTION_ON})
+    try:
+        data = await request.json()
+        IS_DETECTION_ON = data.get("enable", False)
+        logger.info(f"AI Vision Toggled: {IS_DETECTION_ON}")
+        return web.json_response({"status": "success", "detection": IS_DETECTION_ON})
+    except Exception as e:
+        logger.error(f"JSON Decode Error: {e}")
+        return web.json_response({"status": "error", "message": "Invalid JSON format"}, status=400)
 
 async def toggle_follow(request: web.Request):
     global IS_FOLLOW_ON
