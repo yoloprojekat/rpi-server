@@ -36,10 +36,9 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip wheel --no-cache-dir --wheel-dir /build/wheels -r requirements.txt
 
 # 4. Pre-download the YOLO model
-# OpenCV will no longer crash here because the system libraries are installed.
+# FIX: Removed the 'mv' command because WORKDIR is already /build
 RUN pip install ultralytics && \
-    python3 -c "from ultralytics import YOLO; YOLO('yolo26n.pt')" && \
-    mv yolo26n.pt /build/yolo26n.pt
+    python3 -c "from ultralytics import YOLO; YOLO('yolo26n.pt')"
 
 
 # Stage 2: Final Runtime
