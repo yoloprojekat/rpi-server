@@ -4,6 +4,7 @@ FROM python:3.11-slim-bookworm AS builder
 WORKDIR /build
 
 # 1. Install build-only dependencies
+# --- FIX: Added libxcb1, libglib2.0-0, and libgl1-mesa-glx for cv2 ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
@@ -16,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     libcap-dev \
     libgpiod-dev \
+    libxcb1 \
+    libglib2.0-0 \
+    libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Compile lgpio C library
@@ -31,8 +35,8 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir "numpy<2" && \
     pip wheel --no-cache-dir --wheel-dir /build/wheels -r requirements.txt
 
-# --- FIX: PRE-DOWNLOAD THE YOLO MODEL ---
-# We use the builder stage to download it so the final stage stays small
+# 4. Pre-download the YOLO model
+# OpenCV will no longer crash here because the system libraries are installed.
 RUN pip install ultralytics && \
     python3 -c "from ultralytics import YOLO; YOLO('yolo26n.pt')" && \
     mv yolo26n.pt /build/yolo26n.pt
@@ -85,7 +89,7 @@ RUN pip install --no-cache-dir /wheels/* "numpy<2.0.0" && \
 # 4. Copy application code
 COPY . .
 
-# --- FIX: COPY THE MODEL FROM BUILDER ---
+# 5. Copy the model from builder
 COPY --from=builder /build/yolo26n.pt /app/yolo26n.pt
 
 EXPOSE 1607
