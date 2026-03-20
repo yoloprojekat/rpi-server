@@ -25,11 +25,17 @@ RUN wget -q https://github.com/joan2937/lg/archive/master.zip && \
     strip --strip-unneeded /usr/local/lib/lib*.so* && \
     cd .. && rm -rf master.zip lg-master
 
-# 3. Build Wheels (Ultralytics/Torch takes a while here)
+# 3. Build Wheels
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir "numpy<2" && \
     pip wheel --no-cache-dir --wheel-dir /build/wheels -r requirements.txt
+
+# --- FIX: PRE-DOWNLOAD THE YOLO MODEL ---
+# We use the builder stage to download it so the final stage stays small
+RUN pip install ultralytics && \
+    python3 -c "from ultralytics import YOLO; YOLO('yolo26n.pt')" && \
+    mv yolo26n.pt /build/yolo26n.pt
 
 
 # Stage 2: Final Runtime
@@ -61,7 +67,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg && \
     libcap2 \
     gpiod \
     libgpiod2 \
-    # --- ADDED FOR OPENCV & YOLO ---
     libglib2.0-0 \
     libgl1-mesa-glx \
     libsm6 \
@@ -80,10 +85,9 @@ RUN pip install --no-cache-dir /wheels/* "numpy<2.0.0" && \
 # 4. Copy application code
 COPY . .
 
-# Ensure the model file is present (or downloaded during build)
-# RUN python3 -c "from ultralytics import YOLO; YOLO('yolo26n.pt')"
+# --- FIX: COPY THE MODEL FROM BUILDER ---
+COPY --from=builder /build/yolo26n.pt /app/yolo26n.pt
 
-# Use your specific port for the competition
 EXPOSE 1607
 
 CMD ["python", "main.py"]
