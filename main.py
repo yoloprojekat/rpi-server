@@ -28,20 +28,19 @@ except Exception as e:
     logger.error(f"Hardware initialization failed: {e}")
     sys.exit(1)
 
-# --- SHARED STATE (INITIALIZED) ---
+# --- SHARED STATE ---
 LAST_CMD_TIME = 0.0
-LATEST_FRAME = b''           # Raw JPEG bytes for streaming
+LATEST_FRAME = b''           # Clean frame for processing
+LATEST_AI_FRAME = b''        # Frame with YOLO boxes drawn
 DETECTION_RESULTS = None     # Shared YOLO boxes
 FRAME_COND = asyncio.Condition() 
-FRAME_COUNT = 0  # Add this to track frames for throttling
+FRAME_COUNT = 0              # Throttle counter for drawing
 
 IS_DETECTION_ON = False      # Toggle for drawing boxes/names
 IS_FOLLOW_ON = False         # Toggle for motor movement
-IS_YOLO_RUNNING = False      # Master toggle (Legacy support)
 
 # --- YOLO SETUP ---
 try:
-    # Loading YOLOv26 (NMS-Free optimized)
     model = YOLO("yolo26n.pt") 
     logger.info("YOLOv26 Model Loaded Successfully.")
 except Exception as e:
@@ -86,20 +85,19 @@ async def yolo_detection_loop():
     logger.info("YOLO Detection Loop Ready.")
     
     while True:
-        # If both AI features are off, idle to save CPU
+        # Idle to save CPU if both AI features are off
         if not IS_DETECTION_ON and not IS_FOLLOW_ON:
             DETECTION_RESULTS = None
             await asyncio.sleep(0.5)
             continue
 
         if LATEST_FRAME:
-            # Inference on the latest camera frame
             nparr = np.frombuffer(LATEST_FRAME, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if img is not None:
-                results = model.predict(img, conf=0.25, verbose=False)
-                # Store results for the drawing function (capture_and_encode)
+                # conf=0.35 is a great balance for the competition
+                results = model.predict(img, conf=0.35, verbose=False)
                 DETECTION_RESULTS = results[0].boxes if len(results) > 0 else None
                 
                 # ONLY execute movement if following is enabled
@@ -117,37 +115,46 @@ async def yolo_detection_loop():
                 elif IS_FOLLOW_ON and DETECTION_RESULTS is None:
                     stop_motors()
 
-        await asyncio.sleep(0.05) # ~20 FPS pacing
+        await asyncio.sleep(0.05) # ~20 FPS pacing for inference
 
 # --- CAMERA & STREAMING LOGIC ---
 def capture_and_encode(picam2: Picamera2) -> bytes | None:
-    global DETECTION_RESULTS, IS_DETECTION_ON, FRAME_COUNT
+    global DETECTION_RESULTS, IS_DETECTION_ON, FRAME_COUNT, LATEST_AI_FRAME
     try:
         raw_frame = picam2.capture_array("main")
         img = cv2.cvtColor(raw_frame, cv2.COLOR_RGB2BGR)
         
-        # Increment frame counter
+        # Increment global frame counter (1 to 25)
         FRAME_COUNT = (FRAME_COUNT + 1) % 25 
 
-        # ONLY DRAW 5 TIMES PER SECOND (Every 5th frame)
-        # This keeps the video smooth but the AI overlay efficient
-        if IS_DETECTION_ON and (FRAME_COUNT % 5 == 0):
-            h, w, _ = img.shape
-            # Draw Dead Zone Guides
-            cv2.line(img, (int(w * 0.35), 0), (int(w * 0.35), h), (255, 255, 255), 1)
-            cv2.line(img, (int(w * 0.65), 0), (int(w * 0.65), h), (255, 255, 255), 1)
+        # --- LOGIC: ONLY UPDATE AI DRAWING 5 TIMES PER SECOND ---
+        if IS_DETECTION_ON:
+            if FRAME_COUNT % 5 == 0:
+                h, w = img.shape[:2]
+                cv2.line(img, (int(w*0.35), 0), (int(w*0.35), h), (255,255,255), 1)
+                cv2.line(img, (int(w*0.65), 0), (int(w*0.65), h), (255,255,255), 1)
 
-            if DETECTION_RESULTS is not None:
-                for box in DETECTION_RESULTS:
-                    b = box.xyxy[0].cpu().numpy().astype(int)
-                    label_name = model.names[int(box.cls[0])].upper()
-                    # Draw Bounding Box
-                    cv2.rectangle(img, (b[0], b[1]), (b[2], b[3]), (0, 255, 127), 2)
-                    cv2.putText(img, label_name, (b[0], b[1] - 5), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 127), 2)
+                if DETECTION_RESULTS is not None:
+                    for box in DETECTION_RESULTS:
+                        b = box.xyxy[0].cpu().numpy().astype(int)
+                        name = model.names[int(box.cls[0])].upper()
+                        conf = float(box.conf[0])
+                        
+                        cv2.rectangle(img, (b[0], b[1]), (b[2], b[3]), (0, 255, 127), 2)
+                        cv2.putText(img, f"{name} {conf:.2f}", (b[0], b[1]-5), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 127), 2)
+                
+                # Save drawn frame as the current AI view
+                _, buffer = cv2.imencode('.jpg', img)
+                LATEST_AI_FRAME = buffer.tobytes()
+            
+            # Return the last-known AI frame for smooth video
+            return LATEST_AI_FRAME if LATEST_AI_FRAME else b''
+        else:
+            # Vision OFF: Send clean JPEG
+            success, buffer = cv2.imencode('.jpg', img)
+            return buffer.tobytes() if success else None
 
-        success, buffer = cv2.imencode('.jpg', img)
-        if success: return buffer.tobytes()
     except Exception as e:
         logger.error(f"Encoding Error: {e}")
     return None
@@ -194,7 +201,9 @@ async def handle_commands(request: web.Request):
             speed = SPEED_ROTATION if cmd in ROTATION_CMDS else SPEED_NORMAL
             execute_move(MOVEMENTS[cmd], duty_cycle=speed)
         return web.json_response({"status": "ok", "cmd": cmd})
-    except Exception: return web.json_response({"error": "Bad Request"}, status=400)
+    except Exception as e: 
+        logger.error(f"Command Error: {e}")
+        return web.json_response({"error": "Bad Request"}, status=400)
 
 async def toggle_detection(request: web.Request):
     global IS_DETECTION_ON
@@ -204,16 +213,20 @@ async def toggle_detection(request: web.Request):
         logger.info(f"AI Vision Toggled: {IS_DETECTION_ON}")
         return web.json_response({"status": "success", "detection": IS_DETECTION_ON})
     except Exception as e:
-        logger.error(f"JSON Decode Error: {e}")
-        return web.json_response({"status": "error", "message": "Invalid JSON format"}, status=400)
+        logger.error(f"JSON Decode Error in Detection: {e}")
+        return web.json_response({"error": "Invalid JSON format"}, status=400)
 
 async def toggle_follow(request: web.Request):
     global IS_FOLLOW_ON
-    data = await request.json()
-    IS_FOLLOW_ON = data.get("enable", False)
-    if not IS_FOLLOW_ON: stop_motors()
-    logger.info(f"AI Following Toggled: {IS_FOLLOW_ON}")
-    return web.json_response({"follow": IS_FOLLOW_ON})
+    try:
+        data = await request.json()
+        IS_FOLLOW_ON = data.get("enable", False)
+        if not IS_FOLLOW_ON: stop_motors()
+        logger.info(f"AI Following Toggled: {IS_FOLLOW_ON}")
+        return web.json_response({"status": "success", "follow": IS_FOLLOW_ON})
+    except Exception as e:
+        logger.error(f"JSON Decode Error in Follow: {e}")
+        return web.json_response({"error": "Invalid JSON format"}, status=400)
 
 async def watchdog():
     while True:
