@@ -9,7 +9,7 @@
   <i>Edukativna platforma: Optimizovan mrežni gateway za hardversku orkestraciju, prilagođen studentima.</i>
 </p>
 
-[![Python](https://img.shields.io/badge/Python-3.13-38bdf8?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11-38bdf8?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Deployment-Docker-2496ed?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![Raspberry Pi](https://img.shields.io/badge/Hardware-RPi_5-c51a4a?style=for-the-badge&logo=raspberrypi&logoColor=white)](https://www.raspberrypi.com/)
 [![HTTP](https://img.shields.io/badge/Stream-HTTP_MJPEG-0ea5e9?style=for-the-badge&logo=fastapi&logoColor=white)](https://en.wikipedia.org/wiki/Motion_JPEG)
