@@ -22,7 +22,7 @@ Implementacija Docker kontejnera na **Debian 13 (Trixie)** sistemu rešava kriti
 
 * **Izolacija Zavisnosti (No Dependency Hell):** Specifične verzije biblioteka za kameru i GPIO su izolovane od host sistema, sprečavajući pucanje aplikacije prilikom sistemskih ažuriranja.
 * **Host OS Zaštita (PEP 668):** Debian 13 striktno štiti sistemski Python. Kontejner omogućava slobodnu instalaciju paketa bez narušavanja stabilnosti OS-a.
-* **Deterministički Deployment ($O(1)$):** Vreme potrebno za setup novog uređaja smanjeno je sa 45+ minuta na manje od 2 minuta povlačenjem gotovog image-a.
+* **Deterministički Deployment:** Vreme potrebno za setup novog uređaja smanjeno je sa 45+ minuta na manje od 2 minuta povlačenjem gotovog image-a.
 * **Direktan Hardverski Pristup:** Korišćenjem `privileged: true` i mapiranjem `/dev` particija, kontejner zadržava nativan pristup hardveru uz performanse identične direktnom izvršavanju.
 
 ---
