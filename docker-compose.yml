@@ -26,10 +26,11 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # Auto-recovery healthcheck via dedicated /health endpoint using Python urllib
+    # Auto-recovery healthcheck via dedicated /health endpoint using lightweight curl
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:1607/health', timeout=3)"]
-      interval: 15s
-      timeout: 5s
+      test: ["CMD", "curl", "-f", "http://localhost:1607/health"]
+      interval: 10s
+      timeout: 3s
       retries: 3
-      start_period: 20s
+      start_period: 5s
+

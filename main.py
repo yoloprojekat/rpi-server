@@ -10,10 +10,10 @@ from aiohttp import web
 import aiohttp_cors
 
 # --- OPTIONAL DEPENDENCY IMPORTS WITH ROBUST FALLBACKS ---
-try:
-    import torch
-except ImportError:
-    torch = None
+# PyTorch and Ultralytics are deferred to load_yolo_async() to allow <300ms server startup
+torch = None
+YOLO = None
+model = None
 
 try:
     from gpiozero import PWMOutputDevice, DigitalOutputDevice
@@ -25,11 +25,6 @@ try:
     from picamera2 import Picamera2
 except ImportError:
     Picamera2 = None
-
-try:
-    from ultralytics import YOLO
-except ImportError:
-    YOLO = None
 
 # --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
@@ -65,8 +60,16 @@ def init_hardware():
         motor_pins = [MockPin(p) for p in [17, 27, 22, 23, 24, 25, 5, 6]]
         return
 
-    # Attempt RPi 5 controller (chip 4 = RP1 southbridge), fallback to chip 0, then default
-    for chip_id in [4, 0, None]:
+    # Fast-path probe for Raspberry Pi 5 RP1 southbridge (/dev/gpiochip4) vs legacy (/dev/gpiochip0)
+    target_chips = []
+    if os.path.exists("/dev/gpiochip4"):
+        target_chips.append(4)  # RPi 5 RP1
+    if os.path.exists("/dev/gpiochip0"):
+        target_chips.append(0)  # Legacy RPi 4/3
+    if not target_chips:
+        target_chips.append(None)  # Default fallback if chip detection unavailable
+
+    for chip_id in target_chips:
         try:
             if chip_id is not None:
                 factory = LGPIOFactory(chip=chip_id)
@@ -101,22 +104,64 @@ class ServerState:
         self.frame_id = 0                # Monotonically increasing frame counter
         self.camera_ready = False
         self.yolo_ready = False
+        self.yolo_loading = False        # True during background model loading
         self.condition = asyncio.Condition()
 
 state = ServerState()
 
-# --- YOLO SETUP ---
-model = None
-try:
-    if YOLO is not None:
-        model_path = os.getenv("YOLO_MODEL_PATH", "yolo26n.pt")
-        model = YOLO(model_path)
-        state.yolo_ready = True
-        logger.info(f"YOLO Model ({model_path}) Loaded Successfully.")
-    else:
-        logger.warning("Ultralytics YOLO is not installed. AI features disabled.")
-except Exception as e:
-    logger.error(f"Failed to load YOLO model: {e}")
+# --- ASYNCHRONOUS YOLO LOADER ---
+async def load_yolo_async():
+    """
+    Asynchronously imports PyTorch and Ultralytics and loads the YOLO weights in a worker thread.
+    Allows the HTTP server and camera stream to bind and serve requests in <300ms,
+    without blocking during cold container startup.
+    """
+    global torch, YOLO, model
+    state.yolo_loading = True
+    logger.info("Asynchronously loading AI engine in background...")
+
+    def _loader():
+        nonlocal_torch = None
+        nonlocal_yolo = None
+        t_start = time.time()
+        try:
+            import torch as t_mod
+            nonlocal_torch = t_mod
+        except ImportError:
+            logger.warning("PyTorch not installed. Running in CPU/Mock mode.")
+
+        try:
+            from ultralytics import YOLO as y_mod
+            nonlocal_yolo = y_mod
+        except ImportError:
+            logger.warning("Ultralytics YOLO not installed. AI features disabled.")
+
+        loaded_model = None
+        if nonlocal_yolo is not None:
+            model_path = os.getenv("YOLO_MODEL_PATH", "yolo26n.pt")
+            try:
+                loaded_model = nonlocal_yolo(model_path)
+                # Quick warmup with dummy array to compile PyTorch graph & cache font
+                warmup_img = np.zeros((64, 64, 3), dtype=np.uint8)
+                if nonlocal_torch is not None:
+                    with nonlocal_torch.inference_mode():
+                        loaded_model.predict(warmup_img, verbose=False)
+                else:
+                    loaded_model.predict(warmup_img, verbose=False)
+                logger.info(f"YOLO Model ({model_path}) loaded & warmed up in {time.time() - t_start:.2f}s.")
+            except Exception as e:
+                logger.error(f"Failed to load YOLO model: {e}")
+                loaded_model = None
+
+        return nonlocal_torch, nonlocal_yolo, loaded_model
+
+    loaded_torch, loaded_yolo, loaded_model = await asyncio.to_thread(_loader)
+    torch = loaded_torch
+    YOLO = loaded_yolo
+    model = loaded_model
+    state.yolo_ready = (model is not None)
+    state.yolo_loading = False
+    logger.info(f"AI Subsystem Ready. (Active: {state.yolo_ready})")
 
 # --- MOVEMENT LOGIC & CONSTANTS ---
 SPEED_NORMAL = 0.3
@@ -203,6 +248,11 @@ async def yolo_detection_loop():
             if not state.is_detection_on and not state.is_follow_on:
                 state.detections = []
                 await asyncio.sleep(0.2)
+                continue
+
+            # Wait if YOLO model is still asynchronously loading in background
+            if not state.yolo_ready:
+                await asyncio.sleep(0.1)
                 continue
 
             # Work on a copy of the clean raw BGR frame (never with old bounding boxes drawn!)
@@ -405,7 +455,12 @@ async def toggle_detection(request: web.Request):
             state.detections = []
             state.ai_stream_frame = b''
         logger.info(f"AI Vision Toggled: {state.is_detection_on}")
-        return web.json_response({"status": "success", "detection": state.is_detection_on})
+        return web.json_response({
+            "status": "success",
+            "detection": state.is_detection_on,
+            "yolo_ready": state.yolo_ready,
+            "yolo_loading": state.yolo_loading
+        })
     except Exception as e:
         logger.error(f"Detection toggle error: {e}")
         return web.json_response({"error": "Invalid JSON format"}, status=400)
@@ -417,7 +472,12 @@ async def toggle_follow(request: web.Request):
         if not state.is_follow_on:
             stop_motors()
         logger.info(f"AI Following Toggled: {state.is_follow_on}")
-        return web.json_response({"status": "success", "follow": state.is_follow_on})
+        return web.json_response({
+            "status": "success",
+            "follow": state.is_follow_on,
+            "yolo_ready": state.yolo_ready,
+            "yolo_loading": state.yolo_loading
+        })
     except Exception as e:
         logger.error(f"Follow toggle error: {e}")
         return web.json_response({"error": "Invalid JSON format"}, status=400)
@@ -429,6 +489,7 @@ async def health_check(request: web.Request):
         "status": "ok",
         "camera_active": state.camera_ready,
         "yolo_active": state.yolo_ready,
+        "yolo_loading": state.yolo_loading,
         "detection_enabled": state.is_detection_on,
         "follow_enabled": state.is_follow_on,
         "uptime_seconds": round(uptime, 1)
@@ -452,27 +513,7 @@ async def watchdog():
 
 # --- MAIN ENTRY ---
 async def main():
-    picam2 = None
-    if Picamera2 is not None:
-        try:
-            picam2 = Picamera2()
-            # Configure native BGR888 format directly (eliminates per-frame cvtColor CPU overhead)
-            config = picam2.create_video_configuration(main={"size": (640, 480), "format": "BGR888"})
-            picam2.configure(config)
-            picam2.start()
-            logger.info("Picamera2 started successfully in BGR888 mode.")
-        except Exception as e:
-            logger.warning(f"Picamera2 init failed (will use fallback frames): {e}")
-            picam2 = None
-    else:
-        logger.warning("Picamera2 not installed. Using fallback video stream.")
-
-    # Background Tasks
-    camera_task = asyncio.create_task(camera_loop(picam2))
-    yolo_task = asyncio.create_task(yolo_detection_loop())
-    watchdog_task = asyncio.create_task(watchdog())
-
-    # Web Application & Routing
+    # 1. Start HTTP Server FIRST for near-instant (<300ms) port binding & healthcheck response
     app = web.Application()
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")
@@ -499,12 +540,35 @@ async def main():
     logger.info("Video Stream: http://localhost:1607/video_feed")
     logger.info("==========================================")
 
+    # 2. Camera Initialization (runs while server is already live)
+    picam2 = None
+    if Picamera2 is not None:
+        try:
+            picam2 = Picamera2()
+            # Configure native BGR888 format directly (eliminates per-frame cvtColor CPU overhead)
+            config = picam2.create_video_configuration(main={"size": (640, 480), "format": "BGR888"})
+            picam2.configure(config)
+            picam2.start()
+            logger.info("Picamera2 started successfully in BGR888 mode.")
+        except Exception as e:
+            logger.warning(f"Picamera2 init failed (will use fallback frames): {e}")
+            picam2 = None
+    else:
+        logger.warning("Picamera2 not installed. Using fallback video stream.")
+
+    # 3. Launch Background Tasks
+    camera_task = asyncio.create_task(camera_loop(picam2))
+    yolo_task = asyncio.create_task(yolo_detection_loop())
+    model_loader_task = asyncio.create_task(load_yolo_async())
+    watchdog_task = asyncio.create_task(watchdog())
+
     try:
         await asyncio.Event().wait()
     finally:
         logger.info("Shutting down server tasks...")
         camera_task.cancel()
         yolo_task.cancel()
+        model_loader_task.cancel()
         watchdog_task.cancel()
         stop_motors()
         if picam2 is not None:

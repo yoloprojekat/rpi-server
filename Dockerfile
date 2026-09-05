@@ -34,17 +34,21 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir "numpy<2" && \
     pip wheel --no-cache-dir --wheel-dir /build/wheels -r requirements.txt
 
-# 4. Pre-download the YOLO26 model
-RUN pip install ultralytics && \
-    python3 -c "from ultralytics import YOLO; YOLO('yolo26n.pt')"
+# 4. Pre-download YOLO26 model & pre-warm Ultralytics assets (font, graph, config)
+RUN pip install --no-cache-dir ultralytics && \
+    mkdir -p /build/ultralytics_cache/Ultralytics && \
+    python3 -c "from ultralytics import YOLO; import numpy as np; m = YOLO('yolo26n.pt'); m.predict(np.zeros((64, 64, 3), dtype=np.uint8), verbose=False)" && \
+    cp -r /root/.config/Ultralytics/* /build/ultralytics_cache/Ultralytics/ || true
 
 
 # Stage 2: Final Runtime
 FROM python:3.11-slim-bookworm
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH="/usr/lib/python3/dist-packages"
+# Optimization: Bytecode writing enabled (removing PYTHONDONTWRITEBYTECODE), offline flags set
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH="/usr/lib/python3/dist-packages" \
+    YOLO_OFFLINE=1 \
+    YOLO_VERBOSE=False
 
 WORKDIR /app
 
@@ -84,12 +88,17 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir /wheels/* "numpy<2.0.0" && \
     rm -rf /wheels requirements.txt
 
-# 4. Copy application code
+# 4. Copy model & pre-warmed Ultralytics config/assets from builder
+COPY --from=builder /build/yolo26n.pt /app/yolo26n.pt
+COPY --from=builder /build/ultralytics_cache/Ultralytics /root/.config/Ultralytics
+
+# 5. Copy application code
 COPY . .
 
-# 5. Copy the model from builder
-COPY --from=builder /build/yolo26n.pt /app/yolo26n.pt
+# 6. Pre-compile Python bytecode into immutable image layers for instant startup
+RUN python3 -m compileall -q /app /usr/local/lib/python3.11
 
 EXPOSE 1607
 
-CMD ["python", "main.py"]
+# Execute with -O to optimize bytecode execution
+CMD ["python", "-O", "main.py"]
