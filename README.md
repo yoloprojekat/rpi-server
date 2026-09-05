@@ -363,8 +363,8 @@ sequenceDiagram
 ### Key Optimizations Implemented:
 
 1. **Ahead-of-Time Bytecode Compilation**:
-   - `Dockerfile` runs `python3 -m compileall -q /app /usr/local/lib/python3.11` during the image build.
-   - Removing `PYTHONDONTWRITEBYTECODE=1` ensures Python reads pre-compiled `.pyc` files directly from disk cache without runtime AST compilation, saving 3–5 seconds on cold boot.
+   - `Dockerfile` runs ahead-of-time compilation (`compileall` with `-o 0 -o 1`) during image build for `/app` and system packages.
+   - Removing `PYTHONDONTWRITEBYTECODE=1` ensures Python reads pre-compiled `.pyc` and `.opt-1.pyc` files directly from disk cache without runtime AST compilation, saving 3–5 seconds on cold boot.
 
 2. **Asynchronous Model Initialization**:
    - Heavy dependencies (`torch`, `ultralytics`) and model weight loading (`yolo26n.pt`) are deferred from the module top-level into an asynchronous background worker (`load_yolo_async()`).

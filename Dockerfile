@@ -96,7 +96,9 @@ COPY --from=builder /build/ultralytics_cache/Ultralytics /root/.config/Ultralyti
 COPY . .
 
 # 6. Pre-compile Python bytecode into immutable image layers for instant startup
-RUN python3 -m compileall -q /app /usr/local/lib/python3.11
+RUN python3 -m compileall -q -o 0 -o 1 /app && \
+    (python3 -m compileall -q -o 0 -o 1 -x "/(tests?|testing)/" /usr/local/lib/python3.11 || true)
+
 
 EXPOSE 1607
 
