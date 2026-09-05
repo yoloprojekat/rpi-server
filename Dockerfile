@@ -4,7 +4,6 @@ FROM python:3.11-slim-bookworm AS builder
 WORKDIR /build
 
 # 1. Install build-only dependencies
-# --- FIX: Added libxcb1, libglib2.0-0, and libgl1-mesa-glx for cv2 ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
@@ -35,8 +34,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir "numpy<2" && \
     pip wheel --no-cache-dir --wheel-dir /build/wheels -r requirements.txt
 
-# 4. Pre-download the YOLO model
-# FIX: Removed the 'mv' command because WORKDIR is already /build
+# 4. Pre-download the YOLO26 model
 RUN pip install ultralytics && \
     python3 -c "from ultralytics import YOLO; YOLO('yolo26n.pt')"
 
@@ -75,6 +73,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg && \
     libsm6 \
     libxext6 \
     libxrender1 \
+    curl \
     && apt-get purge -y wget gnupg \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*

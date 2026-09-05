@@ -1,59 +1,35 @@
 services:
-
   rpi-server:
-
-    # Replace 'your_dockerhub_username' with your actual Docker Hub username
-
+    # Image name on Docker Hub (or build locally)
     image: yoloprojekat/rpi-server:latest
-
     container_name: rpi_stream_server
-
     restart: unless-stopped
 
-    # Host networking for zero-latency MJPEG streaming (runs directly on port 1607)
-
+    # Host networking for zero-latency MJPEG streaming & direct port 1607 binding
     network_mode: "host"
 
-    # Grants required permissions for dynamic hardware (libcamera, dma_heap, gpio)
-
+    # Grants full hardware privileges for libcamera, dma_heap, and RP1 GPIO
     privileged: true
 
-    # Mounts the entire /dev tree so dynamic camera nodes are always accessible
-
+    # Mount device tree and udev for dynamic camera node discovery
     volumes:
-
       - /run/udev:/run/udev:ro
-
       - /dev:/dev
 
-    # Hardware access permissions for the container (kept for good measure)
-
-    # Increased shared memory to prevent camera frame buffer crashes
-
+    # Shared memory allocation to prevent camera/DMA frame buffer starvation
     shm_size: '512m'
 
-    # SD Card Protection: limits log size to prevent filling up the drive
-
+    # SD Card Protection: limits container log size
     logging:
-
       driver: "json-file"
-
       options:
-
         max-size: "10m"
-
         max-file: "3"
 
-    # Auto-recovery if the HTTP stream stops responding
-
+    # Auto-recovery healthcheck via dedicated /health endpoint using Python urllib
     healthcheck:
-
-      test: ["CMD", "curl", "-f", "http://localhost:1607/video_feed"]
-
-      interval: 30s
-
-      timeout: 10s
-
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:1607/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
       retries: 3
-
-      start_period: 15s
+      start_period: 20s
